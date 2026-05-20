@@ -1,38 +1,5 @@
 {
   "timeout_seconds": 2.0,
-  "servers": [
-    {
-      "id": "ad01seed0001",
-      "name": "AD-01",
-      "host": "192.168.0.101",
-      "ports": [
-        53,
-        88,
-        135,
-        389,
-        445,
-        3389
-      ],
-      "services": [
-        "NTDS",
-        "DNS"
-      ],
-      "enable_remote_metrics": true
-    },
-    {
-      "id": "web01seed001",
-      "name": "WEB-01",
-      "host": "192.168.0.110",
-      "ports": [
-        80,
-        443,
-        3389
-      ],
-      "services": [
-        "W3SVC"
-      ],
-      "enable_remote_metrics": true
-    }
-  ],
-  "updated_at": "2026-05-18T11:08:48.969272Z"
+  "servers": [],
+  "updated_at": "2026-05-20T11:27:46.910759Z"
 }

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import platform
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
@@ -32,6 +33,25 @@ def collect_local_metrics() -> dict[str, Any]:
 
 def _escape_ps_single_quote(value: str) -> str:
     return value.replace("'", "''")
+
+
+def _run_powershell_script(script: str, timeout_seconds: float = 8.0) -> tuple[bytes, bytes, str | None]:
+    try:
+        completed = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", script],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout_seconds,
+            check=False,
+        )
+        return completed.stdout, completed.stderr, None
+    except subprocess.TimeoutExpired as exc:
+        stderr = exc.stderr if isinstance(exc.stderr, bytes) else b""
+        return b"", stderr, "TIMEOUT"
+    except FileNotFoundError:
+        return b"", b"powershell executable not found", "POWERSHELL_NOT_FOUND"
+    except Exception as exc:  # Defensive guard: never crash /api/check on remote metric failure
+        return b"", str(exc).encode("utf-8", errors="ignore"), "EXEC_ERROR"
 
 
 async def _query_remote_metrics(server: ServerTarget) -> dict[str, Any]:
@@ -67,27 +87,22 @@ try {{
     }} | ConvertTo-Json -Compress
 }}
 """.strip()
-
-    proc = await asyncio.create_subprocess_exec(
-        "powershell",
-        "-NoProfile",
-        "-Command",
-        script,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-
-    try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=8.0)
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.communicate()
+    stdout, stderr, exec_error = await asyncio.to_thread(_run_powershell_script, script, 8.0)
+    if exec_error == "TIMEOUT":
         return {
             "server_id": server.id,
             "server_name": server.name,
             "host": server.host,
             "status": "ERROR",
             "detail": "Remote metrics command timed out.",
+        }
+    if exec_error:
+        return {
+            "server_id": server.id,
+            "server_name": server.name,
+            "host": server.host,
+            "status": "ERROR",
+            "detail": f"PowerShell execution failed: {exec_error}",
         }
 
     output = stdout.decode("utf-8", errors="ignore").strip()
@@ -144,5 +159,19 @@ async def collect_remote_metrics(servers: list[ServerTarget]) -> list[dict[str, 
     tasks = [asyncio.create_task(_query_remote_metrics(server)) for server in deduped.values()]
     if not tasks:
         return []
-    return await asyncio.gather(*tasks)
-
+    gathered = await asyncio.gather(*tasks, return_exceptions=True)
+    results: list[dict[str, Any]] = []
+    for server, item in zip(deduped.values(), gathered):
+        if isinstance(item, Exception):
+            results.append(
+                {
+                    "server_id": server.id,
+                    "server_name": server.name,
+                    "host": server.host,
+                    "status": "ERROR",
+                    "detail": f"Unexpected remote metrics error: {item}",
+                }
+            )
+        else:
+            results.append(item)
+    return results

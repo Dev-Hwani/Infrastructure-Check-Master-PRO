@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import platform
+import subprocess
 from datetime import datetime, timezone
 from typing import Any
 
@@ -15,6 +16,25 @@ def _utc_now_iso() -> str:
 
 def _escape_ps_single_quote(value: str) -> str:
     return value.replace("'", "''")
+
+
+def _run_powershell_script(script: str, timeout_seconds: float = 8.0) -> tuple[bytes, bytes, str | None]:
+    try:
+        completed = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", script],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout_seconds,
+            check=False,
+        )
+        return completed.stdout, completed.stderr, None
+    except subprocess.TimeoutExpired as exc:
+        stderr = exc.stderr if isinstance(exc.stderr, bytes) else b""
+        return b"", stderr, "TIMEOUT"
+    except FileNotFoundError:
+        return b"", b"powershell executable not found", "POWERSHELL_NOT_FOUND"
+    except Exception as exc:  # Defensive guard: never crash /api/check on service query failure
+        return b"", str(exc).encode("utf-8", errors="ignore"), "EXEC_ERROR"
 
 
 async def _check_service(server: ServerTarget, service_name: str) -> dict[str, Any]:
@@ -46,21 +66,8 @@ try {{
     }} | ConvertTo-Json -Compress
 }}
 """.strip()
-
-    proc = await asyncio.create_subprocess_exec(
-        "powershell",
-        "-NoProfile",
-        "-Command",
-        script,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-
-    try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=8.0)
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.communicate()
+    stdout, stderr, exec_error = await asyncio.to_thread(_run_powershell_script, script, 8.0)
+    if exec_error == "TIMEOUT":
         return {
             "checked_at": _utc_now_iso(),
             "server_id": server.id,
@@ -69,6 +76,16 @@ try {{
             "service_name": service_name,
             "status": "ERROR",
             "detail": "Service query timed out",
+        }
+    if exec_error:
+        return {
+            "checked_at": _utc_now_iso(),
+            "server_id": server.id,
+            "server_name": server.name,
+            "host": server.host,
+            "service_name": service_name,
+            "status": "ERROR",
+            "detail": f"PowerShell execution failed: {exec_error}",
         }
 
     output = stdout.decode("utf-8", errors="ignore").strip()
@@ -124,12 +141,30 @@ try {{
 
 
 async def run_service_sweep(servers: list[ServerTarget]) -> dict[str, Any]:
-    tasks: list[asyncio.Task[dict[str, Any]]] = []
+    task_specs: list[tuple[ServerTarget, str, asyncio.Task[dict[str, Any]]]] = []
     for server in servers:
         for service_name in server.services:
-            tasks.append(asyncio.create_task(_check_service(server, service_name)))
+            task_specs.append((server, service_name, asyncio.create_task(_check_service(server, service_name))))
 
-    results = await asyncio.gather(*tasks) if tasks else []
+    tasks = [task for _, _, task in task_specs]
+    gathered = await asyncio.gather(*tasks, return_exceptions=True) if tasks else []
+    results: list[dict[str, Any]] = []
+    for (server, service_name, _), item in zip(task_specs, gathered):
+        if isinstance(item, Exception):
+            results.append(
+                {
+                    "checked_at": _utc_now_iso(),
+                    "server_id": server.id,
+                    "server_name": server.name,
+                    "host": server.host,
+                    "service_name": service_name,
+                    "status": "ERROR",
+                    "detail": f"Unexpected service check error: {item}",
+                }
+            )
+        else:
+            results.append(item)
+
     counts = {
         "RUNNING": 0,
         "STOPPED": 0,
@@ -147,4 +182,3 @@ async def run_service_sweep(servers: list[ServerTarget]) -> dict[str, Any]:
             "status_counts": counts,
         },
     }
-
