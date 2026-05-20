@@ -7,7 +7,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Noto+Sans+KR:wght@400;500;700&display=swap"
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;700&family=Sora:wght@500;600;700&display=swap"
       rel="stylesheet"
     />
     <link
@@ -16,27 +16,37 @@
       integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH"
       crossorigin="anonymous"
     />
-    <link rel="stylesheet" href="/static/styles.css" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260520-1" />
   </head>
   <body>
+    <div class="bg-layer" aria-hidden="true"></div>
+    <div id="toastContainer" class="toast-stack" aria-live="polite" aria-atomic="true"></div>
+
     <main class="container py-4 py-lg-5">
       <section class="hero-panel mb-4">
         <div class="hero-text">
-          <p class="eyebrow">ASYNC INFRASTRUCTURE AUDIT</p>
+          <p class="eyebrow">ASYNC INFRA CHECK PLATFORM</p>
           <h1>인프라 체크 마스터 PRO</h1>
           <p class="subtext">
-            수십 개 서버/포트를 2초 타임아웃 기준으로 비동기 병렬 점검하고 실시간 상태를 시각화합니다.
+            다수 서버와 포트를 병렬 점검하고, 포트/서비스/원격 리소스 상태를 한 화면에서 빠르게 확인합니다.
           </p>
-          <p id="lastChecked" class="last-checked mb-0">최근 점검: -</p>
+          <p id="lastChecked" class="last-checked mb-0">최근 점검: 없음</p>
         </div>
         <div class="hero-actions">
           <button id="checkBtn" class="btn btn-audit">
             <span id="checkSpinner" class="spinner-border spinner-border-sm me-2 d-none"></span>
             종합 점검 시작
           </button>
-          <a id="downloadBtn" href="/api/report/download" class="btn btn-outline-dark">
-            엑셀 리포트 다운로드
-          </a>
+          <button id="downloadBtn" type="button" class="btn btn-ghost">엑셀 리포트 다운로드</button>
+        </div>
+      </section>
+
+      <section class="guide-strip mb-3">
+        <p class="guide-title">빠른 사용 순서</p>
+        <div class="guide-items">
+          <span>1. 설정 관리에서 서버 등록</span>
+          <span>2. 종합 점검 시작</span>
+          <span>3. 상태 확인 후 리포트 다운로드</span>
         </div>
       </section>
 
@@ -96,6 +106,15 @@
             </div>
           </div>
 
+          <article class="status-panel mb-3">
+            <div class="status-chip"><span>OPEN</span><strong id="statusOpenCount">0</strong></div>
+            <div class="status-chip"><span>REFUSED</span><strong id="statusRefusedCount">0</strong></div>
+            <div class="status-chip"><span>TIMEOUT</span><strong id="statusTimeoutCount">0</strong></div>
+            <div class="status-chip"><span>UNKNOWN</span><strong id="statusUnknownCount">0</strong></div>
+            <div class="status-chip"><span>ERROR</span><strong id="statusErrorCount">0</strong></div>
+            <div class="status-chip"><span>SVC STOPPED</span><strong id="serviceStoppedCount">0</strong></div>
+          </article>
+
           <article class="panel mb-3">
             <div class="panel-title-wrap">
               <h2>원격 Hyper-V 리소스</h2>
@@ -113,7 +132,7 @@
                 </thead>
                 <tbody id="remoteMetricsBody">
                   <tr>
-                    <td colspan="5" class="text-muted py-3">아직 수집된 데이터가 없습니다.</td>
+                    <td colspan="5" class="text-muted py-3">아직 수집된 원격 리소스 데이터가 없습니다.</td>
                   </tr>
                 </tbody>
               </table>
@@ -147,7 +166,7 @@
           <article class="panel">
             <div class="panel-title-wrap">
               <h2>포트 점검 결과</h2>
-              <p class="panel-note mb-0" id="summaryText">대기 중</p>
+              <p class="panel-note mb-0" id="summaryText">점검 대기 중</p>
             </div>
             <div class="table-responsive">
               <table class="table table-hover align-middle mb-0">
@@ -180,11 +199,11 @@
               <input id="editingServerId" type="hidden" />
               <div class="col-12 col-md-4">
                 <label for="serverName" class="form-label">서버명</label>
-                <input id="serverName" class="form-control" required />
+                <input id="serverName" class="form-control" placeholder="예: APP-01" required />
               </div>
               <div class="col-12 col-md-4">
                 <label for="serverHost" class="form-label">IP 또는 Host</label>
-                <input id="serverHost" class="form-control" required />
+                <input id="serverHost" class="form-control" placeholder="예: 192.168.0.120" required />
               </div>
               <div class="col-12 col-md-4">
                 <label for="serverPorts" class="form-label">포트 목록 (콤마 구분)</label>
@@ -206,7 +225,7 @@
               </div>
               <div class="col-12 d-flex gap-2">
                 <button type="submit" class="btn btn-audit">저장</button>
-                <button id="resetFormBtn" type="button" class="btn btn-outline-secondary">초기화</button>
+                <button id="resetFormBtn" type="button" class="btn btn-outline-secondary">입력 초기화</button>
               </div>
             </form>
           </article>
@@ -244,6 +263,6 @@
       integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz"
       crossorigin="anonymous"
     ></script>
-    <script src="/static/app.js"></script>
+    <script src="/static/app.js?v=20260520-1"></script>
   </body>
 </html>

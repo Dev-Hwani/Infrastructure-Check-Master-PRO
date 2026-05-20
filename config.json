@@ -1,5 +1,30 @@
 {
   "timeout_seconds": 2.0,
-  "servers": [],
-  "updated_at": "2026-05-20T11:27:46.910759Z"
+  "servers": [
+    {
+      "id": "3b2bc43325f7",
+      "name": "localhost",
+      "host": "127.0.0.1",
+      "ports": [
+        3000,
+        8000
+      ],
+      "services": [],
+      "enable_remote_metrics": false
+    },
+    {
+      "id": "6873762b4fea",
+      "name": "MyComputer",
+      "host": "192.168.219.101",
+      "ports": [
+        80,
+        443,
+        3389,
+        8000
+      ],
+      "services": [],
+      "enable_remote_metrics": false
+    }
+  ],
+  "updated_at": "2026-05-20T12:04:29.124879Z"
 }
