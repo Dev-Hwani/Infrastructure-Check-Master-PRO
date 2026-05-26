@@ -1,5 +1,6 @@
 const state = {
   servers: [],
+  draftPortTargets: [],
 };
 
 const statusRowClassMap = {
@@ -13,7 +14,27 @@ const statusRowClassMap = {
   UNKNOWN_HOST: "status-unknown",
   UDP_OPEN_OR_FILTERED: "status-unknown",
   UDP_CLOSED: "status-refused",
+  PROBE_TIMEOUT: "status-timeout",
+  PROBE_FAILED: "status-error",
+  INVALID_RESPONSE: "status-error",
   ERROR: "status-error",
+};
+
+const actionGuideMap = {
+  OPEN: "정상 통신 가능",
+  REFUSED: "서비스가 포트를 리슨 중인지 확인",
+  TIMEOUT: "방화벽/ACL 드롭 가능성 확인",
+  FILTERED: "인바운드/아웃바운드 방화벽 정책 확인",
+  NO_ROUTE: "게이트웨이/라우팅/vSwitch 경로 확인",
+  HOST_UNREACHABLE: "대상 서버 전원/네트워크 상태 확인",
+  NETWORK_UNREACHABLE: "서브넷/VLAN/라우팅 테이블 확인",
+  UNKNOWN_HOST: "DNS 설정 또는 호스트명 오타 확인",
+  UDP_OPEN_OR_FILTERED: "UDP 특성상 무응답일 수 있음, DNS/NTP 프로브 권장",
+  UDP_CLOSED: "UDP 포트 닫힘 또는 ICMP Port Unreachable",
+  PROBE_TIMEOUT: "앱 프로브 타임아웃, 서비스 자체 응답 지연 확인",
+  PROBE_FAILED: "프로브 핸드셰이크 실패, 앱 로그 확인",
+  INVALID_RESPONSE: "앱 프로토콜 응답 형식 확인",
+  ERROR: "reason_code와 서버 로그 추가 확인",
 };
 
 function notify({ type = "info", title = "안내", message = "", timeout = 3600 }) {
@@ -32,10 +53,7 @@ function notify({ type = "info", title = "안내", message = "", timeout = 3600 
     </div>
   `;
 
-  const close = () => {
-    notice.remove();
-  };
-
+  const close = () => notice.remove();
   notice.querySelector(".notice-close").addEventListener("click", close);
   container.appendChild(notice);
   window.setTimeout(close, timeout);
@@ -80,10 +98,111 @@ function formatDateTime(isoString) {
   return date.toLocaleString("ko-KR", { hour12: false });
 }
 
+function normalizePortTarget(input) {
+  const port = Number.parseInt(input.port, 10);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
+  const transport = String(input.transport || "tcp").toLowerCase();
+  const probe = String(input.probe || "auto").toLowerCase();
+  const retries = Number.parseInt(input.retries, 10);
+  if (!["tcp", "udp"].includes(transport)) return null;
+  if (!["auto", "none", "http", "https", "rdp", "dns", "ntp"].includes(probe)) return null;
+  if (!Number.isInteger(retries) || retries < 0 || retries > 5) return null;
+  return { port, transport, probe, retries };
+}
+
+function addOrReplaceDraftPortTarget(target) {
+  const key = `${target.port}/${target.transport}/${target.probe}`;
+  const idx = state.draftPortTargets.findIndex(
+    (item) => `${item.port}/${item.transport}/${item.probe}` === key
+  );
+  if (idx >= 0) {
+    state.draftPortTargets[idx] = target;
+  } else {
+    state.draftPortTargets.push(target);
+  }
+  state.draftPortTargets.sort((a, b) => a.port - b.port);
+}
+
+function renderDraftPortTargets() {
+  const tbody = document.getElementById("portTargetBody");
+  if (!state.draftPortTargets.length) {
+    tbody.innerHTML = '<tr><td colspan="5" class="text-muted py-2">고급 타깃이 없습니다.</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = state.draftPortTargets
+    .map(
+      (target, index) => `
+      <tr>
+        <td>${target.port}</td>
+        <td>${target.transport.toUpperCase()}</td>
+        <td>${target.probe}</td>
+        <td>${target.retries}</td>
+        <td>
+          <button class="btn btn-sm btn-outline-danger" data-action="remove-target" data-index="${index}">
+            삭제
+          </button>
+        </td>
+      </tr>
+    `
+    )
+    .join("");
+}
+
+function resetAdvancedPortTargetInputs() {
+  document.getElementById("advancedPort").value = "";
+  document.getElementById("advancedTransport").value = "tcp";
+  document.getElementById("advancedProbe").value = "auto";
+  document.getElementById("advancedRetries").value = "2";
+}
+
+function addDraftPortTargetFromForm() {
+  const raw = {
+    port: document.getElementById("advancedPort").value,
+    transport: document.getElementById("advancedTransport").value,
+    probe: document.getElementById("advancedProbe").value,
+    retries: document.getElementById("advancedRetries").value,
+  };
+  const target = normalizePortTarget(raw);
+  if (!target) {
+    notify({
+      type: "warning",
+      title: "고급 타깃 입력값 오류",
+      message: "Port(1~65535), Transport, Probe, Retries(0~5)를 확인해 주세요.",
+      timeout: 4800,
+    });
+    return;
+  }
+
+  addOrReplaceDraftPortTarget(target);
+  renderDraftPortTargets();
+  resetAdvancedPortTargetInputs();
+  notify({
+    type: "success",
+    title: "고급 타깃 추가",
+    message: `${target.port}/${target.transport}/${target.probe} (retries=${target.retries})`,
+  });
+}
+
+function removeDraftPortTarget(index) {
+  if (!Number.isInteger(index) || index < 0 || index >= state.draftPortTargets.length) return;
+  const [removed] = state.draftPortTargets.splice(index, 1);
+  renderDraftPortTargets();
+  notify({
+    type: "info",
+    title: "고급 타깃 삭제",
+    message: `${removed.port}/${removed.transport}/${removed.probe} 항목을 삭제했습니다.`,
+  });
+}
+
+function getRecommendedAction(row) {
+  if (row.recommended_action) return row.recommended_action;
+  return actionGuideMap[row.status] || "상세 로그를 확인해 추가 점검해 주세요.";
+}
+
 function updateMetricCards(payload) {
   const local = payload.local_metrics || {};
   const summary = payload.summary || {};
-
   document.getElementById("cpuMetric").textContent = `${local.cpu_percent ?? "-"}%`;
   document.getElementById("ramMetric").textContent = `${local.memory_percent ?? "-"}%`;
   document.getElementById("diskMetric").textContent = `${local.disk_percent ?? "-"}%`;
@@ -101,7 +220,7 @@ function updateStatusChips(payload) {
     (counts.NETWORK_UNREACHABLE ?? 0);
   const errorLike = (counts.ERROR ?? 0) + (counts.UDP_CLOSED ?? 0);
 
-  document.getElementById("statusOpenCount").textContent = counts.OPEN ?? 0;
+  document.getElementById("statusOpenCount").textContent = (counts.OPEN ?? 0) + (counts.UDP_OPEN_OR_FILTERED ?? 0);
   document.getElementById("statusRefusedCount").textContent = counts.REFUSED ?? 0;
   document.getElementById("statusTimeoutCount").textContent = timeoutLike;
   document.getElementById("statusUnknownCount").textContent = unreachable;
@@ -140,19 +259,20 @@ function renderRemoteMetrics(remoteMetrics) {
 function renderCheckResults(results) {
   const tbody = document.getElementById("resultBody");
   if (!Array.isArray(results) || results.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="6" class="text-muted py-3">점검 결과가 없습니다.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7" class="text-muted py-3">점검 결과가 없습니다.</td></tr>';
     return;
   }
 
   tbody.innerHTML = results
     .map((item) => {
       const rowClass = statusRowClassMap[item.status] || "status-error";
-      const transport = (item.transport || "tcp").toUpperCase();
+      const transport = String(item.transport || "tcp").toUpperCase();
       const probe = item.probe_result || {};
-      const probeLabel =
+      const probeText =
         probe.probe_status && probe.probe_status !== "SKIPPED"
-          ? ` | Probe ${probe.probe_status}: ${probe.probe_detail || "-"}`
-          : "";
+          ? `Probe ${probe.probe_status}: ${probe.probe_detail || "-"}`
+          : "Probe SKIPPED";
+      const detail = `${item.detail || "-"} | Reason: ${item.reason_code || "UNKNOWN"} | ${probeText}`;
       return `
         <tr class="${rowClass}">
           <td>${item.server_name}</td>
@@ -160,7 +280,8 @@ function renderCheckResults(results) {
           <td>${item.port} <span class="text-muted">(${transport})</span></td>
           <td><span class="badge status-badge">${item.status}</span></td>
           <td>${item.latency_ms}</td>
-          <td>${item.detail || "-"}${probeLabel}</td>
+          <td>${detail}</td>
+          <td>${getRecommendedAction(item)}</td>
         </tr>
       `;
     })
@@ -198,11 +319,13 @@ function updateSummary(payload) {
   const summary = payload.summary || {};
   const counts = summary.status_counts || {};
   const probeCounts = summary.probe_status_counts || {};
+  const transportCounts = summary.transport_counts || {};
   const svc = payload.service_checks?.summary?.status_counts || {};
   const duration = Number(summary.duration_ms || 0).toFixed(2);
   document.getElementById("summaryText").textContent =
-    `완료 ${summary.total_checks ?? 0}건 | OPEN ${counts.OPEN ?? 0} | REFUSED ${counts.REFUSED ?? 0} | ` +
-    `FILTERED ${counts.FILTERED ?? 0} | NO_ROUTE ${counts.NO_ROUTE ?? 0} | PROBE_OK ${probeCounts.PROBE_OK ?? 0} | 서비스 STOPPED ${svc.STOPPED ?? 0} | ${duration}ms`;
+    `완료 ${summary.total_checks ?? 0}건 | TCP ${transportCounts.tcp ?? 0} | UDP ${transportCounts.udp ?? 0} | ` +
+    `FILTERED ${counts.FILTERED ?? 0} | NO_ROUTE ${counts.NO_ROUTE ?? 0} | PROBE_OK ${probeCounts.PROBE_OK ?? 0} | ` +
+    `서비스 STOPPED ${svc.STOPPED ?? 0} | ${duration}ms`;
 }
 
 function resetServerForm() {
@@ -212,21 +335,40 @@ function resetServerForm() {
   document.getElementById("serverPorts").value = "";
   document.getElementById("serverServices").value = "";
   document.getElementById("remoteMetricsEnabled").checked = true;
+  state.draftPortTargets = [];
+  renderDraftPortTargets();
+  resetAdvancedPortTargetInputs();
 }
 
 function fillServerForm(server) {
   document.getElementById("editingServerId").value = server.id;
   document.getElementById("serverName").value = server.name;
   document.getElementById("serverHost").value = server.host;
-  document.getElementById("serverPorts").value = server.ports.join(",");
+  document.getElementById("serverPorts").value = (server.ports || []).join(",");
   document.getElementById("serverServices").value = (server.services || []).join(",");
   document.getElementById("remoteMetricsEnabled").checked = !!server.enable_remote_metrics;
+  state.draftPortTargets = (server.port_targets || []).map((item) => ({
+    port: item.port,
+    transport: item.transport || "tcp",
+    probe: item.probe || "auto",
+    retries: Number.isInteger(item.retries) ? item.retries : 2,
+  }));
+  renderDraftPortTargets();
+}
+
+function summarizeAdvancedTargets(portTargets) {
+  if (!Array.isArray(portTargets) || !portTargets.length) return "-";
+  const text = portTargets
+    .slice(0, 2)
+    .map((t) => `${t.port}/${String(t.transport).toUpperCase()}/${t.probe}`)
+    .join(", ");
+  return portTargets.length > 2 ? `${text} +${portTargets.length - 2}` : text;
 }
 
 function renderServerList() {
   const tbody = document.getElementById("serverListBody");
   if (!state.servers.length) {
-    tbody.innerHTML = '<tr><td colspan="6" class="text-muted py-3">등록된 서버가 없습니다.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7" class="text-muted py-3">등록된 서버가 없습니다.</td></tr>';
     return;
   }
 
@@ -236,7 +378,8 @@ function renderServerList() {
       <tr>
         <td>${server.name}</td>
         <td>${server.host}</td>
-        <td>${server.ports.join(", ")}</td>
+        <td>${(server.ports || []).join(", ") || "-"}</td>
+        <td>${summarizeAdvancedTargets(server.port_targets)}</td>
         <td>${(server.services || []).join(", ") || "-"}</td>
         <td>${server.enable_remote_metrics ? "Y" : "N"}</td>
         <td class="d-flex gap-2">
@@ -363,11 +506,20 @@ async function submitServerForm(event) {
   const services = parseItems(document.getElementById("serverServices").value);
   const enableRemoteMetrics = document.getElementById("remoteMetricsEnabled").checked;
 
-  if (!name || !host || ports.length === 0) {
+  if (!name || !host) {
     notify({
       type: "warning",
       title: "입력값 확인",
-      message: "서버명, IP/Host, 유효한 포트 목록을 모두 입력해 주세요.",
+      message: "서버명과 IP/Host는 필수입니다.",
+      timeout: 4600,
+    });
+    return;
+  }
+  if (ports.length === 0 && state.draftPortTargets.length === 0) {
+    notify({
+      type: "warning",
+      title: "포트 대상 없음",
+      message: "기본 포트 목록 또는 고급 포트 타깃 중 하나 이상을 입력해 주세요.",
       timeout: 4600,
     });
     return;
@@ -377,6 +529,7 @@ async function submitServerForm(event) {
     name,
     host,
     ports,
+    port_targets: state.draftPortTargets,
     services,
     enable_remote_metrics: enableRemoteMetrics,
   };
@@ -462,11 +615,34 @@ async function onServerListClick(event) {
   }
 }
 
+function onDraftTargetTableClick(event) {
+  const target = event.target;
+  if (!(target instanceof HTMLElement)) return;
+  const action = target.dataset.action;
+  if (action !== "remove-target") return;
+  const index = Number.parseInt(target.dataset.index || "", 10);
+  removeDraftPortTarget(index);
+}
+
+function onAdvancedTransportChange() {
+  const transport = document.getElementById("advancedTransport").value;
+  const probeSelect = document.getElementById("advancedProbe");
+  if (transport === "udp" && ["http", "https", "rdp"].includes(probeSelect.value)) {
+    probeSelect.value = "auto";
+  }
+  if (transport === "tcp" && ["dns", "ntp"].includes(probeSelect.value)) {
+    probeSelect.value = "auto";
+  }
+}
+
 async function bootstrap() {
   document.getElementById("checkBtn").addEventListener("click", handleRunCheck);
   document.getElementById("downloadBtn").addEventListener("click", handleDownloadReport);
   document.getElementById("serverForm").addEventListener("submit", submitServerForm);
   document.getElementById("serverListBody").addEventListener("click", onServerListClick);
+  document.getElementById("addPortTargetBtn").addEventListener("click", addDraftPortTargetFromForm);
+  document.getElementById("portTargetBody").addEventListener("click", onDraftTargetTableClick);
+  document.getElementById("advancedTransport").addEventListener("change", onAdvancedTransportChange);
   document.getElementById("resetFormBtn").addEventListener("click", () => {
     resetServerForm();
     notify({
@@ -476,6 +652,7 @@ async function bootstrap() {
     });
   });
 
+  renderDraftPortTargets();
   try {
     await loadConfig({ silent: false });
   } catch (error) {
@@ -489,3 +666,4 @@ async function bootstrap() {
 }
 
 bootstrap();
+

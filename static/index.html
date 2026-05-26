@@ -16,7 +16,7 @@
       integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH"
       crossorigin="anonymous"
     />
-    <link rel="stylesheet" href="/static/styles.css?v=20260520-1" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260526-2" />
   </head>
   <body>
     <div class="bg-layer" aria-hidden="true"></div>
@@ -178,11 +178,12 @@
                     <th>상태</th>
                     <th>지연(ms)</th>
                     <th>상세</th>
+                    <th>조치 가이드</th>
                   </tr>
                 </thead>
                 <tbody id="resultBody">
                   <tr>
-                    <td colspan="6" class="text-muted py-3">[종합 점검 시작] 버튼을 클릭하세요.</td>
+                    <td colspan="7" class="text-muted py-3">[종합 점검 시작] 버튼을 클릭하세요.</td>
                   </tr>
                 </tbody>
               </table>
@@ -207,7 +208,65 @@
               </div>
               <div class="col-12 col-md-4">
                 <label for="serverPorts" class="form-label">포트 목록 (콤마 구분)</label>
-                <input id="serverPorts" class="form-control" placeholder="80,443,3389" required />
+                <input id="serverPorts" class="form-control" placeholder="80,443,3389 (기본 TCP)" />
+              </div>
+              <div class="col-12">
+                <div class="advanced-target-box">
+                  <p class="advanced-title mb-2">고급 포트 타깃 (Transport / Probe / Retries)</p>
+                  <div class="row g-2 align-items-end">
+                    <div class="col-12 col-md-3">
+                      <label for="advancedPort" class="form-label">Port</label>
+                      <input id="advancedPort" type="number" min="1" max="65535" class="form-control" placeholder="53" />
+                    </div>
+                    <div class="col-12 col-md-3">
+                      <label for="advancedTransport" class="form-label">Transport</label>
+                      <select id="advancedTransport" class="form-select">
+                        <option value="tcp">TCP</option>
+                        <option value="udp">UDP</option>
+                      </select>
+                    </div>
+                    <div class="col-12 col-md-3">
+                      <label for="advancedProbe" class="form-label">Probe</label>
+                      <select id="advancedProbe" class="form-select">
+                        <option value="auto">auto</option>
+                        <option value="none">none</option>
+                        <option value="http">http</option>
+                        <option value="https">https</option>
+                        <option value="rdp">rdp</option>
+                        <option value="dns">dns</option>
+                        <option value="ntp">ntp</option>
+                      </select>
+                    </div>
+                    <div class="col-12 col-md-2">
+                      <label for="advancedRetries" class="form-label">Retries</label>
+                      <input id="advancedRetries" type="number" min="0" max="5" class="form-control" value="2" />
+                    </div>
+                    <div class="col-12 col-md-1 d-grid">
+                      <button id="addPortTargetBtn" type="button" class="btn btn-ghost">+</button>
+                    </div>
+                  </div>
+                  <p class="panel-note mt-2 mb-2">
+                    기본 포트 목록 없이도 고급 타깃만으로 점검할 수 있습니다.
+                  </p>
+                  <div class="table-responsive">
+                    <table class="table table-sm align-middle mb-0">
+                      <thead>
+                        <tr>
+                          <th>Port</th>
+                          <th>Transport</th>
+                          <th>Probe</th>
+                          <th>Retries</th>
+                          <th>삭제</th>
+                        </tr>
+                      </thead>
+                      <tbody id="portTargetBody">
+                        <tr>
+                          <td colspan="5" class="text-muted py-2">고급 타깃이 없습니다.</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
               </div>
               <div class="col-12">
                 <label for="serverServices" class="form-label">
@@ -241,6 +300,7 @@
                     <th>서버명</th>
                     <th>호스트</th>
                     <th>포트</th>
+                    <th>고급 타깃</th>
                     <th>서비스</th>
                     <th>원격 모니터링</th>
                     <th>작업</th>
@@ -248,7 +308,7 @@
                 </thead>
                 <tbody id="serverListBody">
                   <tr>
-                    <td colspan="6" class="text-muted py-3">불러오는 중...</td>
+                    <td colspan="7" class="text-muted py-3">불러오는 중...</td>
                   </tr>
                 </tbody>
               </table>
@@ -263,6 +323,6 @@
       integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz"
       crossorigin="anonymous"
     ></script>
-    <script src="/static/app.js?v=20260520-1"></script>
+    <script src="/static/app.js?v=20260526-2"></script>
   </body>
 </html>

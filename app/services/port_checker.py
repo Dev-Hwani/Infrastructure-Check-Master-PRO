@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import os
+import struct
 import socket
 import ssl
 from contextlib import suppress
@@ -23,10 +25,14 @@ WINSOCK_ERRNO_NAMES = {
     10065: "WSAEHOSTUNREACH",
 }
 
-AUTO_PROBE_PORTS: dict[int, ProbeType] = {
+AUTO_TCP_PROBE_PORTS: dict[int, ProbeType] = {
     80: "http",
     443: "https",
     3389: "rdp",
+}
+AUTO_UDP_PROBE_PORTS: dict[int, ProbeType] = {
+    53: "dns",
+    123: "ntp",
 }
 
 RETRYABLE_STATUSES: set[str] = {"TIMEOUT", "FILTERED", "ERROR", "PROBE_TIMEOUT"}
@@ -48,10 +54,12 @@ ERR_PERMISSION = {10013, _safe_errno_value("EACCES"), _safe_errno_value("EPERM")
 ERR_CONN_RESET = {10054, _safe_errno_value("ECONNRESET")}
 
 
-def _resolve_probe_type(probe: ProbeType, port: int) -> ProbeType:
+def _resolve_probe_type(probe: ProbeType, port: int, transport: str) -> ProbeType:
     if probe != "auto":
         return probe
-    return AUTO_PROBE_PORTS.get(port, "none")
+    if transport == "udp":
+        return AUTO_UDP_PROBE_PORTS.get(port, "none")
+    return AUTO_TCP_PROBE_PORTS.get(port, "none")
 
 
 def _errno_reason_name(number: int | None) -> str:
@@ -115,6 +123,30 @@ def _attempt_payload(
         "detail": detail,
         "latency_ms": round(latency_ms, 2),
     }
+
+
+def _recommended_action(status: PortStatus, transport: str, probe_status: str) -> str:
+    if status == "OPEN" and probe_status == "PROBE_OK":
+        return "접속 및 애플리케이션 응답이 정상입니다."
+    if status == "OPEN" and probe_status in {"PROBE_FAILED", "INVALID_RESPONSE", "PROBE_TIMEOUT"}:
+        return "포트는 열려 있으나 앱 응답이 비정상입니다. 서비스 프로세스/앱 로그를 확인하세요."
+    if status == "REFUSED":
+        return "대상은 도달되지만 서비스가 포트를 리슨하지 않습니다. 서비스 실행 상태를 확인하세요."
+    if status in {"TIMEOUT", "FILTERED"}:
+        return "방화벽/보안장비 드롭 가능성이 높습니다. 인바운드/아웃바운드 및 ACL 정책을 점검하세요."
+    if status == "NO_ROUTE":
+        return "라우팅 경로가 없습니다. 게이트웨이, 정적 라우트, Hyper-V vSwitch 구성을 확인하세요."
+    if status in {"NETWORK_UNREACHABLE", "HOST_UNREACHABLE"}:
+        return "네트워크/호스트 도달 불가입니다. 대상 IP, 서브넷, VLAN, 전원 상태를 확인하세요."
+    if status == "UNKNOWN_HOST":
+        return "호스트명 해석 실패입니다. DNS 설정 또는 IP 직접 입력을 확인하세요."
+    if status == "UDP_OPEN_OR_FILTERED":
+        return "UDP는 무응답이 정상일 수 있습니다. DNS/NTP 같은 프로토콜 프로브를 함께 사용하세요."
+    if status == "UDP_CLOSED":
+        return "UDP 포트가 닫혀 있거나 ICMP Port Unreachable 응답을 받았습니다."
+    if transport == "udp" and probe_status == "PROBE_TIMEOUT":
+        return "UDP 프로브 응답이 없습니다. 서비스 기동 여부와 중간 장비 드롭 정책을 확인하세요."
+    return "상세 오류코드(reason_code)와 서버 로그를 기반으로 추가 점검이 필요합니다."
 
 
 async def _tcp_attempt(host: str, port: int, timeout_seconds: float, attempt: int) -> dict[str, Any]:
@@ -361,6 +393,122 @@ async def _rdp_probe(host: str, port: int, timeout_seconds: float) -> dict[str, 
                 await writer.wait_closed()
 
 
+def _build_dns_query_packet(query_name: str = "example.com") -> tuple[int, bytes]:
+    tx_id = int.from_bytes(os.urandom(2), "big")
+    labels = query_name.strip(".").split(".")
+    qname = b"".join(len(label).to_bytes(1, "big") + label.encode("ascii", errors="ignore") for label in labels)
+    qname += b"\x00"
+    header = struct.pack("!HHHHHH", tx_id, 0x0100, 1, 0, 0, 0)
+    question = qname + struct.pack("!HH", 1, 1)  # Type A, Class IN
+    return tx_id, header + question
+
+
+def _dns_probe_sync(host: str, port: int, timeout_seconds: float) -> dict[str, Any]:
+    started = perf_counter()
+    query_id, packet = _build_dns_query_packet()
+    try:
+        addr_infos = socket.getaddrinfo(host, port, type=socket.SOCK_DGRAM)
+    except socket.gaierror as exc:
+        return {
+            "probe_status": "PROBE_FAILED",
+            "probe_detail": f"DNS probe resolve failed: {exc}",
+            "probe_latency_ms": round((perf_counter() - started) * 1000, 2),
+        }
+
+    family, socktype, proto, _, sockaddr = addr_infos[0]
+    sock = socket.socket(family, socktype, proto)
+    sock.settimeout(timeout_seconds)
+    try:
+        sock.sendto(packet, sockaddr)
+        response, _ = sock.recvfrom(512)
+        if len(response) < 12:
+            return {
+                "probe_status": "INVALID_RESPONSE",
+                "probe_detail": "DNS response too short.",
+                "probe_latency_ms": round((perf_counter() - started) * 1000, 2),
+            }
+        response_id = int.from_bytes(response[:2], "big")
+        qr = (response[2] >> 7) & 0x01
+        rcode = response[3] & 0x0F
+        if response_id != query_id or qr != 1:
+            return {
+                "probe_status": "INVALID_RESPONSE",
+                "probe_detail": "DNS response header is invalid.",
+                "probe_latency_ms": round((perf_counter() - started) * 1000, 2),
+            }
+        return {
+            "probe_status": "PROBE_OK",
+            "probe_detail": f"DNS response received (rcode={rcode}).",
+            "probe_latency_ms": round((perf_counter() - started) * 1000, 2),
+        }
+    except socket.timeout:
+        return {
+            "probe_status": "PROBE_TIMEOUT",
+            "probe_detail": f"DNS probe timeout after {timeout_seconds:.1f}s.",
+            "probe_latency_ms": round((perf_counter() - started) * 1000, 2),
+        }
+    except OSError as exc:
+        return {
+            "probe_status": "PROBE_FAILED",
+            "probe_detail": f"DNS probe failed: {exc}",
+            "probe_latency_ms": round((perf_counter() - started) * 1000, 2),
+        }
+    finally:
+        sock.close()
+
+
+def _ntp_probe_sync(host: str, port: int, timeout_seconds: float) -> dict[str, Any]:
+    started = perf_counter()
+    request = b"\x1b" + (47 * b"\x00")
+    try:
+        addr_infos = socket.getaddrinfo(host, port, type=socket.SOCK_DGRAM)
+    except socket.gaierror as exc:
+        return {
+            "probe_status": "PROBE_FAILED",
+            "probe_detail": f"NTP probe resolve failed: {exc}",
+            "probe_latency_ms": round((perf_counter() - started) * 1000, 2),
+        }
+
+    family, socktype, proto, _, sockaddr = addr_infos[0]
+    sock = socket.socket(family, socktype, proto)
+    sock.settimeout(timeout_seconds)
+    try:
+        sock.sendto(request, sockaddr)
+        response, _ = sock.recvfrom(512)
+        if len(response) < 48:
+            return {
+                "probe_status": "INVALID_RESPONSE",
+                "probe_detail": "NTP response too short.",
+                "probe_latency_ms": round((perf_counter() - started) * 1000, 2),
+            }
+        mode = response[0] & 0x07
+        if mode not in {4, 5}:  # server / broadcast server
+            return {
+                "probe_status": "INVALID_RESPONSE",
+                "probe_detail": f"Unexpected NTP mode: {mode}",
+                "probe_latency_ms": round((perf_counter() - started) * 1000, 2),
+            }
+        return {
+            "probe_status": "PROBE_OK",
+            "probe_detail": "NTP response received.",
+            "probe_latency_ms": round((perf_counter() - started) * 1000, 2),
+        }
+    except socket.timeout:
+        return {
+            "probe_status": "PROBE_TIMEOUT",
+            "probe_detail": f"NTP probe timeout after {timeout_seconds:.1f}s.",
+            "probe_latency_ms": round((perf_counter() - started) * 1000, 2),
+        }
+    except OSError as exc:
+        return {
+            "probe_status": "PROBE_FAILED",
+            "probe_detail": f"NTP probe failed: {exc}",
+            "probe_latency_ms": round((perf_counter() - started) * 1000, 2),
+        }
+    finally:
+        sock.close()
+
+
 async def _run_application_probe(host: str, port: int, probe_type: ProbeType, timeout_seconds: float) -> dict[str, Any]:
     if probe_type == "http":
         return await _http_probe(host, port, timeout_seconds, use_tls=False)
@@ -368,6 +516,10 @@ async def _run_application_probe(host: str, port: int, probe_type: ProbeType, ti
         return await _http_probe(host, port, timeout_seconds, use_tls=True)
     if probe_type == "rdp":
         return await _rdp_probe(host, port, timeout_seconds)
+    if probe_type == "dns":
+        return await asyncio.to_thread(_dns_probe_sync, host, port, timeout_seconds)
+    if probe_type == "ntp":
+        return await asyncio.to_thread(_ntp_probe_sync, host, port, timeout_seconds)
     return {
         "probe_status": "SKIPPED",
         "probe_detail": "No application probe configured.",
@@ -445,7 +597,7 @@ async def check_single_port_target(
 
     final_status = _choose_final_status(attempts, target.transport)
     final_attempt = attempts[-1]
-    probe_type = _resolve_probe_type(target.probe, target.port)
+    probe_type = _resolve_probe_type(target.probe, target.port, target.transport)
     probe_result = {
         "probe_type": probe_type,
         "probe_status": "SKIPPED",
@@ -453,7 +605,9 @@ async def check_single_port_target(
         "probe_latency_ms": 0.0,
     }
 
-    if final_status == "OPEN" and target.transport == "tcp" and probe_type != "none":
+    can_probe_tcp = target.transport == "tcp" and final_status == "OPEN"
+    can_probe_udp = target.transport == "udp" and final_status in {"OPEN", "UDP_OPEN_OR_FILTERED"}
+    if probe_type != "none" and (can_probe_tcp or can_probe_udp):
         probe_result = {
             "probe_type": probe_type,
             **(await _run_application_probe(host, target.port, probe_type, timeout_seconds)),
@@ -477,6 +631,7 @@ async def check_single_port_target(
         "status": final_status,
         "reason_code": final_attempt["reason_code"],
         "detail": detail,
+        "recommended_action": _recommended_action(final_status, target.transport, str(probe_result["probe_status"])),
         "latency_ms": round(final_attempt["latency_ms"], 2),
         "total_latency_ms": total_elapsed,
         "attempts": attempts,
@@ -530,4 +685,3 @@ async def run_port_sweep(
             "probe_status_counts": probe_counts,
         },
     }
-

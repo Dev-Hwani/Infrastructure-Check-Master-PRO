@@ -28,6 +28,7 @@ def build_excel_report(payload: dict[str, Any]) -> bytes:
                 "Probe Type": row.get("probe_type"),
                 "Probe Status": probe.get("probe_status"),
                 "Detail": row.get("detail"),
+                "Recommended Action": row.get("recommended_action"),
                 "Latency (ms)": row.get("latency_ms"),
                 "Total Latency (ms)": row.get("total_latency_ms"),
                 "Attempt Count": row.get("attempt_count"),
@@ -82,10 +83,11 @@ def build_excel_report(payload: dict[str, Any]) -> bytes:
             "G": 18,
             "H": 12,
             "I": 14,
-            "J": 50,
+            "J": 42,
             "K": 12,
             "L": 16,
             "M": 12,
+            "N": 50,
         }
         for col, width in widths.items():
             ws.column_dimensions[col].width = width

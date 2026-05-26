@@ -307,7 +307,8 @@ table td {
 }
 
 .form-control,
-.form-check-input {
+.form-check-input,
+.form-select {
   background-color: rgba(18, 33, 49, 0.92);
   border-color: #35506b;
   color: #e4f1fc;
@@ -318,11 +319,25 @@ table td {
 }
 
 .form-control:focus,
-.form-check-input:focus {
+.form-check-input:focus,
+.form-select:focus {
   border-color: #5ca0c5;
   box-shadow: 0 0 0 0.2rem rgba(45, 212, 191, 0.18);
   background-color: rgba(19, 37, 56, 0.95);
   color: #f1f8ff;
+}
+
+.advanced-target-box {
+  border: 1px solid #2d4864;
+  border-radius: 0.8rem;
+  background: rgba(17, 31, 47, 0.72);
+  padding: 0.75rem;
+}
+
+.advanced-title {
+  color: #9fd5ef;
+  font-weight: 700;
+  font-size: 0.92rem;
 }
 
 .form-check-label {
@@ -433,4 +448,3 @@ table td {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
-
