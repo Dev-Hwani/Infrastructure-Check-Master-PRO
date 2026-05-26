@@ -414,6 +414,9 @@ async def _rdp_probe(host: str, port: int, timeout_seconds: float) -> dict[str, 
 
 DNS_QTYPE_BY_PROBE = {
     "dns_a": 1,  # A
+    "dns_aaaa": 28,  # AAAA
+    "dns_mx": 15,  # MX
+    "dns_txt": 16,  # TXT
     "dns_soa": 6,  # SOA
     "dns_srv": 33,  # SRV
 }
@@ -432,6 +435,9 @@ DNS_TYPE_NAME = {
 
 DNS_QUERY_NAME_BY_PROBE = {
     "dns_a": "example.com",
+    "dns_aaaa": "example.com",
+    "dns_mx": "example.com",
+    "dns_txt": "example.com",
     "dns_soa": "example.com",
     "dns_srv": "_ldap._tcp.example.com",
 }
@@ -548,6 +554,8 @@ def _parse_dns_rr(packet: bytes, offset: int) -> tuple[dict[str, Any], int]:
 
     if rtype == 1 and rdlength == 4:  # A
         parsed["address"] = socket.inet_ntoa(packet[rdata_start:rdata_end])
+    elif rtype == 28 and rdlength == 16:  # AAAA
+        parsed["address"] = socket.inet_ntop(socket.AF_INET6, packet[rdata_start:rdata_end])
     elif rtype == 33 and rdlength >= 6:  # SRV
         priority, weight, service_port = struct.unpack("!HHH", packet[rdata_start : rdata_start + 6])
         target, _ = _decode_dns_name(packet, rdata_start + 6)
@@ -555,6 +563,21 @@ def _parse_dns_rr(packet: bytes, offset: int) -> tuple[dict[str, Any], int]:
         parsed["weight"] = weight
         parsed["port"] = service_port
         parsed["target"] = target
+    elif rtype == 15 and rdlength >= 3:  # MX
+        preference = int.from_bytes(packet[rdata_start : rdata_start + 2], "big")
+        exchange, _ = _decode_dns_name(packet, rdata_start + 2)
+        parsed["preference"] = preference
+        parsed["exchange"] = exchange
+    elif rtype == 16 and rdlength >= 1:  # TXT
+        txt_values: list[str] = []
+        cursor = rdata_start
+        while cursor < rdata_end:
+            text_len = packet[cursor]
+            cursor += 1
+            end = min(cursor + text_len, rdata_end)
+            txt_values.append(packet[cursor:end].decode("utf-8", errors="ignore"))
+            cursor = end
+        parsed["txt"] = txt_values
     elif rtype == 6:  # SOA
         mname, soa_cursor = _decode_dns_name(packet, rdata_start)
         rname, soa_cursor = _decode_dns_name(packet, soa_cursor)
@@ -595,6 +618,17 @@ def _dns_answer_summary(answers: list[dict[str, Any]], max_items: int = 3) -> st
         type_name = str(answer.get("type_name", "UNKNOWN"))
         if type_name == "A":
             summary_items.append(f"A {answer.get('address', '-')}")
+        elif type_name == "AAAA":
+            summary_items.append(f"AAAA {answer.get('address', '-')}")
+        elif type_name == "MX":
+            summary_items.append(
+                f"MX {answer.get('preference', '-')}"
+                f" {answer.get('exchange', '-')}"
+            )
+        elif type_name == "TXT":
+            txt_values = answer.get("txt") or []
+            joined = " | ".join(str(item) for item in txt_values[:2])
+            summary_items.append(f"TXT {joined or '-'}")
         elif type_name == "SRV":
             summary_items.append(
                 "SRV "
@@ -761,7 +795,7 @@ async def _run_application_probe(host: str, port: int, probe_type: ProbeType, ti
         return await _http_probe(host, port, timeout_seconds, use_tls=True)
     if probe_type == "rdp":
         return await _rdp_probe(host, port, timeout_seconds)
-    if probe_type in {"dns", "dns_a", "dns_srv", "dns_soa"}:
+    if probe_type in {"dns", "dns_a", "dns_aaaa", "dns_mx", "dns_txt", "dns_srv", "dns_soa"}:
         return await asyncio.to_thread(_dns_probe_sync, host, port, timeout_seconds, probe_type)
     if probe_type == "ntp":
         return await asyncio.to_thread(_ntp_probe_sync, host, port, timeout_seconds)

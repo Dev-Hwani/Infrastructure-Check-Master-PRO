@@ -25,9 +25,9 @@ http://localhost:8000
 - 앱 프로브
 - `http`, `https`, `rdp`
 - UDP 프로브
-- `dns_a`, `dns_srv`, `dns_soa`, `ntp`
+- `dns_a`, `dns_aaaa`, `dns_mx`, `dns_txt`, `dns_srv`, `dns_soa`, `ntp`
 - DNS 응답 본문 파싱
-- `A/SRV/SOA` 레코드 핵심 필드 파싱/표시
+- `A/AAAA/MX/TXT/SRV/SOA` 레코드 핵심 필드 파싱/표시
 - NTP 응답 `version`, `stratum`, `mode` 파싱
 - 결과 일관성 지표
 - `STABLE / FLAKY` + 점수(%)
@@ -55,7 +55,7 @@ http://localhost:8000
 - `Transport`: `tcp` 또는 `udp`
 - `Probe`: transport에 맞는 값만 허용
 - TCP 허용: `auto`, `none`, `http`, `https`, `rdp`
-- UDP 허용: `auto`, `none`, `dns_a`, `dns_srv`, `dns_soa`, `ntp`
+- UDP 허용: `auto`, `none`, `dns_a`, `dns_aaaa`, `dns_mx`, `dns_txt`, `dns_srv`, `dns_soa`, `ntp`
 - `Retries`: 0~5 (최종 시도 횟수는 `retries + 1`)
 
 지원 UX:
@@ -81,8 +81,12 @@ http://localhost:8000
 
 ### 3.5 자격증명 프로파일
 
-- 프로파일별 `도메인/사용자/비밀번호` 저장
+- 프로파일별 `도메인/사용자 + Secret Provider` 관리
 - 서버마다 `credential_profile_id`를 지정
+- Provider
+- `dpapi`: 비밀번호 입력 시 즉시 DPAPI 암호화되어 `encrypted_password`로 저장
+- `env`: `secret_ref=env:환경변수명`에서 비밀 조회
+- `azure_key_vault`: `secret_ref=https://.../secrets/...` 또는 `azurekv:https://...` 지원
 - 지정 시 원격 리소스/서비스 점검 PowerShell에 `-Credential` 적용
 - 미지정 시 현재 실행 계정 사용
 
@@ -109,7 +113,7 @@ http://localhost:8000
 
 - `reason_code` (예: `WSAETIMEDOUT`, `WSAENETUNREACH`)
 - probe 결과 (`PROBE_OK` 등)
-- DNS probe의 경우 응답 레코드 핵심 요약(A/SRV/SOA)
+- DNS probe의 경우 응답 레코드 핵심 요약(A/AAAA/MX/TXT/SRV/SOA)
 - 재시도 이력 (`1:TIMEOUT / 2:OPEN` 형태)
 - 일관성 지표 (`STABLE 100%`, `FLAKY 67%` 등)
 
@@ -121,7 +125,10 @@ http://localhost:8000
 - 원격 리소스/서비스 점검은 Windows PowerShell 원격 질의가 가능한 환경이어야 함
 - 방화벽/권한/도메인 정책에 따라 원격 지표가 `ERROR`로 나올 수 있음
 - 자격증명 프로파일 사용 시, 해당 계정에 원격 조회 권한이 있어야 함
-- 보안 권장: 운영 환경에서는 `config.json` 접근 권한을 최소화하고 계정 비밀번호를 주기적으로 교체
+- `azure_key_vault` 사용 시 `AZURE_KEYVAULT_TOKEN` 또는 `AZURE_ACCESS_TOKEN` 환경변수 필요
+- 보안 권장
+- 운영 환경에서는 `config.json` 접근 권한 최소화
+- `env`/`azure_key_vault` 기반 Secret 공급으로 비밀번호 로테이션 자동화
 
 ## 6) 설정 파일 예시 (`config.json`)
 
@@ -144,9 +151,19 @@ http://localhost:8000
     {
       "name": "AD-Admin",
       "username": "administrator",
-      "password": "******",
+      "secret_provider": "dpapi",
+      "encrypted_password": "01000000d08c9ddf...",
+      "secret_ref": null,
       "domain": "CORP",
       "description": "AD 운영 점검 계정"
+    },
+    {
+      "name": "DB-Prod",
+      "username": "svc_dbcheck",
+      "secret_provider": "env",
+      "secret_ref": "env:DBCHECK_SECRET",
+      "domain": "CORP",
+      "description": "운영 DB 점검 계정"
     }
   ],
   "servers": [
@@ -187,7 +204,7 @@ http://localhost:8000
 
 ## 8) 다음 개선 후보
 
-- 자격증명 암호화 저장(예: OS Secret Store/KMS 연동)
 - 역할 기반 접근 제어(RBAC) 및 감사 로그
 - 가상 스크롤과 서버사이드 페이징 병행(초대형 데이터셋)
-- DNS 추가 타입(AAAA/MX/TXT) 파싱 확장
+- DNS 추가 타입(NS/CNAME/PTR/CAA) 파싱 확장
+- 자격증명 저장소 플러그인 확장(AWS Secrets Manager / HashiCorp Vault)

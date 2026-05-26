@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from ..models import CredentialProfile, ServerTarget
+from .secret_store import SecretStoreError, get_secret_material
 
 
 def _utc_now_iso() -> str:
@@ -43,33 +44,47 @@ def _resolved_username(profile: CredentialProfile) -> str:
     return profile.username
 
 
-def _credential_preamble(profile: CredentialProfile | None) -> str:
+def _credential_preamble(profile: CredentialProfile | None) -> tuple[str, str, str]:
     if profile is None:
-        return "$cred = $null"
+        return "$cred = $null", "current_user", "current_user"
+    material = get_secret_material(profile)
     username = _escape_ps_single_quote(_resolved_username(profile))
-    password = _escape_ps_single_quote(profile.password)
-    return (
-        "$secPwd = ConvertTo-SecureString "
-        f"'{password}' -AsPlainText -Force; "
+    encrypted_password = _escape_ps_single_quote(material.encrypted_password)
+    preamble = (
+        f"$secPwd = ConvertTo-SecureString '{encrypted_password}'; "
         f"$cred = New-Object System.Management.Automation.PSCredential('{username}', $secPwd)"
     )
+    source = material.provider
+    if material.provider in {"env", "azure_key_vault"}:
+        source = f"{material.provider}:{material.source_detail}"
+    return preamble, profile.name, source
 
 
-def _build_service_script(host: str, service: str, profile: CredentialProfile | None) -> str:
-    cred_init = _credential_preamble(profile)
+def _build_service_script(host: str, service: str, credential_preamble: str) -> str:
+    service_filter = service.replace("'", "''")
     return f"""
 $ErrorActionPreference = 'Stop'
-{cred_init}
+{credential_preamble}
 try {{
     if ($null -eq $cred) {{
-        $svc = Get-Service -ComputerName '{host}' -Name '{service}'
+        $svc = Get-CimInstance -ClassName Win32_Service -ComputerName '{host}' -Filter "Name='{service_filter}'"
     }} else {{
-        $svc = Get-Service -ComputerName '{host}' -Name '{service}' -Credential $cred
+        $svc = Get-CimInstance -ClassName Win32_Service -ComputerName '{host}' -Filter "Name='{service_filter}'" -Credential $cred
     }}
-    [PSCustomObject]@{{
-        status = 'OK'
-        service_state = $svc.Status.ToString()
-    }} | ConvertTo-Json -Compress
+
+    if ($null -eq $svc) {{
+        [PSCustomObject]@{{
+            status = 'NOT_FOUND'
+            service_state = ''
+            detail = 'Service not found'
+        }} | ConvertTo-Json -Compress
+    }} else {{
+        [PSCustomObject]@{{
+            status = 'OK'
+            service_state = $svc.State
+            detail = $svc.DisplayName
+        }} | ConvertTo-Json -Compress
+    }}
 }} catch {{
     [PSCustomObject]@{{
         status = 'ERROR'
@@ -113,9 +128,22 @@ async def _check_service(
 
     host = _escape_ps_single_quote(server.host)
     service = _escape_ps_single_quote(service_name)
-    script = _build_service_script(host, service, profile)
+    try:
+        credential_preamble, profile_name, profile_source = _credential_preamble(profile)
+    except SecretStoreError as exc:
+        return {
+            "checked_at": _utc_now_iso(),
+            "server_id": server.id,
+            "server_name": server.name,
+            "host": server.host,
+            "service_name": service_name,
+            "status": "ERROR",
+            "detail": f"Credential resolution failed: {exc}",
+            "credential_profile": profile.name if profile else "current_user",
+        }
+
+    script = _build_service_script(host, service, credential_preamble)
     stdout, stderr, exec_error = await asyncio.to_thread(_run_powershell_script, script, 8.0)
-    profile_name = profile.name if profile else "current_user"
     if exec_error == "TIMEOUT":
         return {
             "checked_at": _utc_now_iso(),
@@ -126,6 +154,7 @@ async def _check_service(
             "status": "ERROR",
             "detail": "Service query timed out",
             "credential_profile": profile_name,
+            "credential_source": profile_source,
         }
     if exec_error:
         return {
@@ -137,6 +166,7 @@ async def _check_service(
             "status": "ERROR",
             "detail": f"PowerShell execution failed: {exec_error}",
             "credential_profile": profile_name,
+            "credential_source": profile_source,
         }
 
     output = stdout.decode("utf-8", errors="ignore").strip()
@@ -151,6 +181,7 @@ async def _check_service(
             "status": "ERROR",
             "detail": error_output or "No output",
             "credential_profile": profile_name,
+            "credential_source": profile_source,
         }
 
     try:
@@ -165,9 +196,11 @@ async def _check_service(
             "status": "ERROR",
             "detail": output,
             "credential_profile": profile_name,
+            "credential_source": profile_source,
         }
 
-    if payload.get("status") == "OK":
+    status = payload.get("status")
+    if status == "OK":
         raw_state = str(payload.get("service_state", "")).upper()
         mapped = "RUNNING" if raw_state == "RUNNING" else "STOPPED"
         return {
@@ -179,19 +212,33 @@ async def _check_service(
             "status": mapped,
             "detail": raw_state or "UNKNOWN",
             "credential_profile": profile_name,
+            "credential_source": profile_source,
+        }
+
+    if status == "NOT_FOUND":
+        return {
+            "checked_at": _utc_now_iso(),
+            "server_id": server.id,
+            "server_name": server.name,
+            "host": server.host,
+            "service_name": service_name,
+            "status": "NOT_FOUND",
+            "detail": payload.get("detail") or "Service not found",
+            "credential_profile": profile_name,
+            "credential_source": profile_source,
         }
 
     error_message = payload.get("error") or error_output or "Unknown error"
-    mapped = "NOT_FOUND" if "cannot find any service" in error_message.lower() else "ERROR"
     return {
         "checked_at": _utc_now_iso(),
         "server_id": server.id,
         "server_name": server.name,
         "host": server.host,
         "service_name": service_name,
-        "status": mapped,
+        "status": "ERROR",
         "detail": error_message,
         "credential_profile": profile_name,
+        "credential_source": profile_source,
     }
 
 

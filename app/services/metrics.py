@@ -12,6 +12,7 @@ from typing import Any
 import psutil
 
 from ..models import CredentialProfile, ServerTarget
+from .secret_store import SecretStoreError, get_secret_material
 
 
 def collect_local_metrics() -> dict[str, Any]:
@@ -60,36 +61,44 @@ def _resolved_username(profile: CredentialProfile) -> str:
     return profile.username
 
 
-def _credential_preamble(profile: CredentialProfile | None) -> str:
+def _credential_preamble(
+    profile: CredentialProfile | None,
+) -> tuple[str, str, str]:
     if profile is None:
-        return "$cred = $null"
+        return "$cred = $null", "current_user", "current_user"
+    material = get_secret_material(profile)
     username = _escape_ps_single_quote(_resolved_username(profile))
-    password = _escape_ps_single_quote(profile.password)
-    return (
-        "$secPwd = ConvertTo-SecureString "
-        f"'{password}' -AsPlainText -Force; "
+    encrypted_password = _escape_ps_single_quote(material.encrypted_password)
+    preamble = (
+        f"$secPwd = ConvertTo-SecureString '{encrypted_password}'; "
         f"$cred = New-Object System.Management.Automation.PSCredential('{username}', $secPwd)"
     )
+    source = material.provider
+    if material.provider in {"env", "azure_key_vault"}:
+        source = f"{material.provider}:{material.source_detail}"
+    return preamble, profile.name, source
 
 
-def _build_remote_metrics_script(host: str, profile: CredentialProfile | None) -> str:
-    cred_init = _credential_preamble(profile)
+def _build_remote_metrics_script(host: str, credential_preamble: str) -> str:
     return f"""
 $ErrorActionPreference = 'Stop'
-{cred_init}
+{credential_preamble}
 try {{
     if ($null -eq $cred) {{
-        $cpu = (Get-Counter -ComputerName '{host}' -Counter '\\Processor(_Total)\\% Processor Time' -MaxSamples 1).CounterSamples[0].CookedValue
+        $cpuSamples = Get-CimInstance -ClassName Win32_Processor -ComputerName '{host}' | Select-Object -ExpandProperty LoadPercentage
         $os = Get-CimInstance -ClassName Win32_OperatingSystem -ComputerName '{host}'
     }} else {{
-        $cpu = (Get-Counter -ComputerName '{host}' -Credential $cred -Counter '\\Processor(_Total)\\% Processor Time' -MaxSamples 1).CounterSamples[0].CookedValue
+        $cpuSamples = Get-CimInstance -ClassName Win32_Processor -ComputerName '{host}' -Credential $cred | Select-Object -ExpandProperty LoadPercentage
         $os = Get-CimInstance -ClassName Win32_OperatingSystem -ComputerName '{host}' -Credential $cred
     }}
+
+    $cpu = ($cpuSamples | Measure-Object -Average).Average
+    if ($null -eq $cpu) {{ $cpu = 0 }}
     $mem = (($os.TotalVisibleMemorySize - $os.FreePhysicalMemory) / $os.TotalVisibleMemorySize) * 100
     [PSCustomObject]@{{
         status = 'OK'
         host = '{host}'
-        cpu_percent = [math]::Round($cpu, 2)
+        cpu_percent = [math]::Round([double]$cpu, 2)
         memory_percent = [math]::Round($mem, 2)
     }} | ConvertTo-Json -Compress
 }} catch {{
@@ -131,10 +140,21 @@ async def _query_remote_metrics(
 
     host = _escape_ps_single_quote(server.host)
     started = perf_counter()
-    script = _build_remote_metrics_script(host, profile)
 
+    try:
+        credential_preamble, profile_name, profile_source = _credential_preamble(profile)
+    except SecretStoreError as exc:
+        return {
+            "server_id": server.id,
+            "server_name": server.name,
+            "host": server.host,
+            "status": "ERROR",
+            "detail": f"Credential resolution failed: {exc}",
+            "credential_profile": profile.name if profile else "current_user",
+        }
+
+    script = _build_remote_metrics_script(host, credential_preamble)
     stdout, stderr, exec_error = await asyncio.to_thread(_run_powershell_script, script, 8.0)
-    profile_name = profile.name if profile else "current_user"
     if exec_error == "TIMEOUT":
         return {
             "server_id": server.id,
@@ -143,6 +163,7 @@ async def _query_remote_metrics(
             "status": "ERROR",
             "detail": "Remote metrics command timed out.",
             "credential_profile": profile_name,
+            "credential_source": profile_source,
         }
     if exec_error:
         return {
@@ -152,6 +173,7 @@ async def _query_remote_metrics(
             "status": "ERROR",
             "detail": f"PowerShell execution failed: {exec_error}",
             "credential_profile": profile_name,
+            "credential_source": profile_source,
         }
 
     output = stdout.decode("utf-8", errors="ignore").strip()
@@ -165,6 +187,7 @@ async def _query_remote_metrics(
             "status": "ERROR",
             "detail": error or "No output from PowerShell command.",
             "credential_profile": profile_name,
+            "credential_source": profile_source,
         }
 
     try:
@@ -177,6 +200,7 @@ async def _query_remote_metrics(
             "status": "ERROR",
             "detail": f"Failed to parse PowerShell output: {output}",
             "credential_profile": profile_name,
+            "credential_source": profile_source,
         }
 
     elapsed_ms = round((perf_counter() - started) * 1000, 2)
@@ -190,6 +214,7 @@ async def _query_remote_metrics(
             "memory_percent": payload.get("memory_percent"),
             "latency_ms": elapsed_ms,
             "credential_profile": profile_name,
+            "credential_source": profile_source,
         }
 
     return {
@@ -199,6 +224,7 @@ async def _query_remote_metrics(
         "status": "ERROR",
         "detail": payload.get("error") or error or "Unknown error",
         "credential_profile": profile_name,
+        "credential_source": profile_source,
     }
 
 

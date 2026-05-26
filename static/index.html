@@ -16,7 +16,7 @@
       integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH"
       crossorigin="anonymous"
     />
-    <link rel="stylesheet" href="/static/styles.css?v=20260527-2" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260527-4" />
   </head>
   <body>
     <div class="bg-layer" aria-hidden="true"></div>
@@ -274,6 +274,9 @@
                         <option value="https">https</option>
                         <option value="rdp">rdp</option>
                         <option value="dns_a">dns_a</option>
+                        <option value="dns_aaaa">dns_aaaa</option>
+                        <option value="dns_mx">dns_mx</option>
+                        <option value="dns_txt">dns_txt</option>
                         <option value="dns_srv">dns_srv</option>
                         <option value="dns_soa">dns_soa</option>
                         <option value="ntp">ntp</option>
@@ -408,12 +411,24 @@
                 <input id="credentialProfileUsername" class="form-control" placeholder="예: administrator" />
               </div>
               <div class="col-12 col-md-2">
+                <label for="credentialProfileProvider" class="form-label">Secret Provider</label>
+                <select id="credentialProfileProvider" class="form-select">
+                  <option value="dpapi">dpapi (로컬 암호화 저장)</option>
+                  <option value="env">env (환경변수 참조)</option>
+                  <option value="azure_key_vault">azure_key_vault (KMS)</option>
+                </select>
+              </div>
+              <div class="col-12 col-md-2">
                 <label for="credentialProfileDomain" class="form-label">도메인(선택)</label>
                 <input id="credentialProfileDomain" class="form-control" placeholder="예: CORP" />
               </div>
               <div class="col-12 col-md-3">
-                <label for="credentialProfilePassword" class="form-label">비밀번호</label>
-                <input id="credentialProfilePassword" type="password" class="form-control" />
+                <label for="credentialProfilePassword" class="form-label">비밀번호(dpapi용)</label>
+                <input id="credentialProfilePassword" type="password" class="form-control" placeholder="수정 시 비워두면 기존 암호 유지" />
+              </div>
+              <div class="col-12 col-md-2">
+                <label for="credentialProfileSecretRef" class="form-label">Secret Ref</label>
+                <input id="credentialProfileSecretRef" class="form-control" placeholder="env:VAR 또는 https://.../secrets/..." />
               </div>
               <div class="col-12 col-md-2">
                 <label for="credentialProfileDescription" class="form-label">설명</label>
@@ -430,13 +445,14 @@
                   <tr>
                     <th>프로파일명</th>
                     <th>계정</th>
+                    <th>Provider</th>
                     <th>설명</th>
                     <th>작업</th>
                   </tr>
                 </thead>
                 <tbody id="credentialProfileListBody">
                   <tr>
-                    <td colspan="4" class="text-muted py-2">등록된 프로파일이 없습니다.</td>
+                    <td colspan="5" class="text-muted py-2">등록된 프로파일이 없습니다.</td>
                   </tr>
                 </tbody>
               </table>
@@ -451,6 +467,6 @@
       integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz"
       crossorigin="anonymous"
     ></script>
-    <script src="/static/app.js?v=20260527-2"></script>
+    <script src="/static/app.js?v=20260527-4"></script>
   </body>
 </html>

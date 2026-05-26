@@ -5,13 +5,26 @@ const PROBE_OPTIONS = Object.freeze([
   "https",
   "rdp",
   "dns_a",
+  "dns_aaaa",
+  "dns_mx",
+  "dns_txt",
   "dns_srv",
   "dns_soa",
   "ntp",
 ]);
 
 const TCP_PROBE_OPTIONS = new Set(["auto", "none", "http", "https", "rdp"]);
-const UDP_PROBE_OPTIONS = new Set(["auto", "none", "dns_a", "dns_srv", "dns_soa", "ntp"]);
+const UDP_PROBE_OPTIONS = new Set([
+  "auto",
+  "none",
+  "dns_a",
+  "dns_aaaa",
+  "dns_mx",
+  "dns_txt",
+  "dns_srv",
+  "dns_soa",
+  "ntp",
+]);
 
 const ROLE_TEMPLATES = Object.freeze({
   AD: [
@@ -549,7 +562,7 @@ function renderCredentialProfileOptions(selectedValue = "") {
 function renderCredentialProfileList() {
   const tbody = document.getElementById("credentialProfileListBody");
   if (!state.credentialProfiles.length) {
-    tbody.innerHTML = '<tr><td colspan="4" class="text-muted py-2">등록된 프로파일이 없습니다.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="5" class="text-muted py-2">등록된 프로파일이 없습니다.</td></tr>';
     return;
   }
 
@@ -559,6 +572,7 @@ function renderCredentialProfileList() {
       <tr>
         <td>${profile.name}</td>
         <td>${profileAccountText(profile)}</td>
+        <td>${profile.secret_provider || "-"}</td>
         <td>${profile.description || "-"}</td>
         <td class="d-flex gap-1">
           <button class="btn btn-sm btn-outline-info" data-action="edit-profile" data-id="${profile.id}">수정</button>
@@ -574,8 +588,10 @@ function resetCredentialProfileForm() {
   document.getElementById("editingCredentialProfileId").value = "";
   document.getElementById("credentialProfileName").value = "";
   document.getElementById("credentialProfileUsername").value = "";
+  document.getElementById("credentialProfileProvider").value = "dpapi";
   document.getElementById("credentialProfileDomain").value = "";
   document.getElementById("credentialProfilePassword").value = "";
+  document.getElementById("credentialProfileSecretRef").value = "";
   document.getElementById("credentialProfileDescription").value = "";
 }
 
@@ -583,9 +599,12 @@ function fillCredentialProfileForm(profile) {
   document.getElementById("editingCredentialProfileId").value = profile.id;
   document.getElementById("credentialProfileName").value = profile.name || "";
   document.getElementById("credentialProfileUsername").value = profile.username || "";
+  document.getElementById("credentialProfileProvider").value = profile.secret_provider || "dpapi";
   document.getElementById("credentialProfileDomain").value = profile.domain || "";
-  document.getElementById("credentialProfilePassword").value = profile.password || "";
+  document.getElementById("credentialProfilePassword").value = "";
+  document.getElementById("credentialProfileSecretRef").value = profile.secret_ref || "";
   document.getElementById("credentialProfileDescription").value = profile.description || "";
+  onCredentialProviderChange();
 }
 
 async function submitCredentialProfileForm(event) {
@@ -593,15 +612,33 @@ async function submitCredentialProfileForm(event) {
   const id = document.getElementById("editingCredentialProfileId").value.trim();
   const name = document.getElementById("credentialProfileName").value.trim();
   const username = document.getElementById("credentialProfileUsername").value.trim();
+  const secretProvider = document.getElementById("credentialProfileProvider").value;
   const password = document.getElementById("credentialProfilePassword").value.trim();
+  const secretRef = document.getElementById("credentialProfileSecretRef").value.trim();
   const domain = document.getElementById("credentialProfileDomain").value.trim();
   const description = document.getElementById("credentialProfileDescription").value.trim();
 
-  if (!name || !username || !password) {
+  if (!name || !username) {
     notify({
       type: "warning",
       title: "입력값 확인",
-      message: "프로파일명, 사용자명, 비밀번호는 필수입니다.",
+      message: "프로파일명, 사용자명은 필수입니다.",
+    });
+    return;
+  }
+  if (secretProvider === "dpapi" && !id && !password) {
+    notify({
+      type: "warning",
+      title: "입력값 확인",
+      message: "dpapi 프로파일 생성 시 비밀번호는 필수입니다.",
+    });
+    return;
+  }
+  if ((secretProvider === "env" || secretProvider === "azure_key_vault") && !secretRef) {
+    notify({
+      type: "warning",
+      title: "입력값 확인",
+      message: `${secretProvider} 프로파일은 Secret Ref가 필요합니다.`,
     });
     return;
   }
@@ -609,7 +646,9 @@ async function submitCredentialProfileForm(event) {
   const payload = {
     name,
     username,
-    password,
+    secret_provider: secretProvider,
+    password: password || null,
+    secret_ref: secretRef || null,
     domain: domain || null,
     description: description || null,
   };
@@ -700,6 +739,12 @@ function formatProbeInfo(item) {
     .map((answer) => {
       const typeName = answer.type_name || "TYPE";
       if (typeName === "A") return `A:${answer.address || "-"}`;
+      if (typeName === "AAAA") return `AAAA:${answer.address || "-"}`;
+      if (typeName === "MX") return `MX:${answer.preference || "-"} ${answer.exchange || "-"}`;
+      if (typeName === "TXT") {
+        const txtValues = Array.isArray(answer.txt) ? answer.txt.slice(0, 2) : [];
+        return `TXT:${txtValues.join("|") || "-"}`;
+      }
       if (typeName === "SRV") return `SRV:${answer.port || "-"}->${answer.target || "-"}`;
       if (typeName === "SOA") return `SOA:${answer.mname || "-"}`;
       return `${typeName}:${answer.name || "-"}`;
@@ -773,6 +818,7 @@ function renderRemoteMetrics(remoteMetrics) {
       const mem = ok ? `${item.memory_percent}%` : "-";
       const detailParts = [ok ? "정상" : item.detail || "오류"];
       if (item.credential_profile) detailParts.push(`계정: ${item.credential_profile}`);
+      if (item.credential_source) detailParts.push(`소스: ${item.credential_source}`);
       const detail = detailParts.join(" | ");
       const badgeClass = ok ? "text-bg-success" : "text-bg-danger";
       return `
@@ -804,6 +850,7 @@ function renderServiceResults(serviceChecks) {
       if (item.status === "ERROR") badgeClass = "text-bg-dark";
       const detailParts = [item.detail || "-"];
       if (item.credential_profile) detailParts.push(`계정: ${item.credential_profile}`);
+      if (item.credential_source) detailParts.push(`소스: ${item.credential_source}`);
       return `
         <tr>
           <td>${item.server_name}</td>
@@ -1239,6 +1286,23 @@ function onResultTableScroll() {
   renderVirtualResultRows();
 }
 
+function onCredentialProviderChange() {
+  const provider = document.getElementById("credentialProfileProvider").value;
+  const passwordInput = document.getElementById("credentialProfilePassword");
+  const secretRefInput = document.getElementById("credentialProfileSecretRef");
+
+  if (provider === "dpapi") {
+    passwordInput.disabled = false;
+    secretRefInput.disabled = true;
+    secretRefInput.value = "";
+    return;
+  }
+
+  passwordInput.disabled = true;
+  passwordInput.value = "";
+  secretRefInput.disabled = false;
+}
+
 async function bootstrap() {
   document.getElementById("checkBtn").addEventListener("click", handleRunCheck);
   document.getElementById("downloadBtn").addEventListener("click", handleDownloadReport);
@@ -1259,8 +1323,10 @@ async function bootstrap() {
 
   document.getElementById("credentialProfileForm").addEventListener("submit", submitCredentialProfileForm);
   document.getElementById("credentialProfileListBody").addEventListener("click", onCredentialProfileListClick);
+  document.getElementById("credentialProfileProvider").addEventListener("change", onCredentialProviderChange);
   document.getElementById("resetCredentialProfileFormBtn").addEventListener("click", () => {
     resetCredentialProfileForm();
+    onCredentialProviderChange();
     notify({ type: "info", title: "프로파일 폼 초기화", message: "자격증명 프로파일 입력 폼을 초기화했습니다." });
   });
 
@@ -1278,6 +1344,7 @@ async function bootstrap() {
   renderTemplateList();
   renderCredentialProfileList();
   renderCredentialProfileOptions("");
+  onCredentialProviderChange();
   refreshResultView({ resetScroll: true });
   try {
     await loadConfig({ silent: false });

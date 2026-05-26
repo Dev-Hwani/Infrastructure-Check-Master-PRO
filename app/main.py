@@ -39,6 +39,27 @@ latest_check_lock = asyncio.Lock()
 latest_check_snapshot: dict[str, Any] = {}
 
 
+def _serialize_credential_profile(profile: Any) -> dict[str, Any]:
+    return {
+        "id": profile.id,
+        "name": profile.name,
+        "username": profile.username,
+        "domain": profile.domain,
+        "description": profile.description,
+        "secret_provider": profile.secret_provider,
+        "secret_ref": profile.secret_ref,
+        "has_secret": bool(profile.encrypted_password or profile.secret_ref or profile.legacy_password),
+    }
+
+
+def _serialize_config(config: Any) -> dict[str, Any]:
+    payload = config.model_dump(mode="json")
+    payload["credential_profiles"] = [
+        _serialize_credential_profile(profile) for profile in config.credential_profiles
+    ]
+    return payload
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -47,7 +68,7 @@ async def health() -> dict[str, str]:
 @app.get("/api/config")
 async def get_config() -> dict[str, Any]:
     config = config_manager.get_config()
-    return config.model_dump(mode="json")
+    return _serialize_config(config)
 
 
 @app.post("/api/servers", status_code=201)
@@ -112,13 +133,16 @@ async def delete_template(template_id: str) -> Response:
 @app.get("/api/credential-profiles")
 async def list_credential_profiles() -> list[dict[str, Any]]:
     profiles = config_manager.list_credential_profiles()
-    return [profile.model_dump(mode="json") for profile in profiles]
+    return [_serialize_credential_profile(profile) for profile in profiles]
 
 
 @app.post("/api/credential-profiles", status_code=201)
 async def create_credential_profile(profile: CredentialProfileCreate) -> dict[str, Any]:
-    created = config_manager.add_credential_profile(profile)
-    return created.model_dump(mode="json")
+    try:
+        created = config_manager.add_credential_profile(profile)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _serialize_credential_profile(created)
 
 
 @app.put("/api/credential-profiles/{profile_id}")
@@ -127,7 +151,9 @@ async def update_credential_profile(profile_id: str, profile: CredentialProfileU
         updated = config_manager.update_credential_profile(profile_id, profile)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return updated.model_dump(mode="json")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _serialize_credential_profile(updated)
 
 
 @app.delete("/api/credential-profiles/{profile_id}", status_code=204)

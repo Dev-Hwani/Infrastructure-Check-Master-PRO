@@ -17,6 +17,7 @@ from .models import (
     TemplateCreate,
     TemplateUpdate,
 )
+from .services.secret_store import SecretStoreError, encrypt_password_dpapi
 
 
 class ConfigManager:
@@ -45,6 +46,23 @@ class ConfigManager:
             ]
         )
 
+    def _migrate_legacy_credential_profiles(self, config: AppConfig) -> bool:
+        changed = False
+        for profile in config.credential_profiles:
+            has_legacy = bool(profile.legacy_password)
+            if not has_legacy:
+                continue
+            try:
+                profile.encrypted_password = encrypt_password_dpapi(profile.legacy_password or "")
+            except SecretStoreError as exc:
+                raise ValueError(
+                    f"Failed to migrate legacy plaintext credential profile '{profile.name}': {exc}"
+                ) from exc
+            profile.secret_provider = "dpapi"
+            profile.legacy_password = None
+            changed = True
+        return changed
+
     def _load_or_bootstrap(self) -> AppConfig:
         if not self._config_path.exists():
             config = self._default_config()
@@ -56,7 +74,12 @@ class ConfigManager:
             config = self._default_config()
             self._write(config)
             return config
-        return AppConfig.model_validate_json(raw)
+
+        config = AppConfig.model_validate_json(raw)
+        if self._migrate_legacy_credential_profiles(config):
+            config.updated_at = datetime.now(timezone.utc)
+            self._write(config)
+        return config
 
     def _write(self, config: AppConfig) -> None:
         self._config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -75,6 +98,78 @@ class ConfigManager:
             return
         if not self._credential_profile_exists(config, profile_id):
             raise ValueError(f"Credential profile not found: {profile_id}")
+
+    def _build_profile_for_create(self, payload: CredentialProfileCreate) -> CredentialProfile:
+        provider = payload.secret_provider
+        if provider == "dpapi":
+            if not payload.password:
+                raise ValueError("password is required for dpapi profile.")
+            try:
+                encrypted = encrypt_password_dpapi(payload.password)
+            except SecretStoreError as exc:
+                raise ValueError(str(exc)) from exc
+            return CredentialProfile(
+                name=payload.name,
+                username=payload.username,
+                secret_provider="dpapi",
+                encrypted_password=encrypted,
+                secret_ref=None,
+                domain=payload.domain,
+                description=payload.description,
+            )
+
+        return CredentialProfile(
+            name=payload.name,
+            username=payload.username,
+            secret_provider=provider,
+            encrypted_password=None,
+            secret_ref=payload.secret_ref,
+            domain=payload.domain,
+            description=payload.description,
+        )
+
+    def _build_profile_for_update(
+        self,
+        existing: CredentialProfile,
+        payload: CredentialProfileUpdate,
+        profile_id: str,
+    ) -> CredentialProfile:
+        provider = payload.secret_provider
+        if provider == "dpapi":
+            encrypted_password: str | None = None
+            if payload.password:
+                try:
+                    encrypted_password = encrypt_password_dpapi(payload.password)
+                except SecretStoreError as exc:
+                    raise ValueError(str(exc)) from exc
+            elif existing.secret_provider == "dpapi" and existing.encrypted_password:
+                encrypted_password = existing.encrypted_password
+            else:
+                raise ValueError(
+                    "password is required when switching to dpapi or when existing encrypted secret is unavailable."
+                )
+
+            return CredentialProfile(
+                id=profile_id,
+                name=payload.name,
+                username=payload.username,
+                secret_provider="dpapi",
+                encrypted_password=encrypted_password,
+                secret_ref=None,
+                domain=payload.domain,
+                description=payload.description,
+            )
+
+        return CredentialProfile(
+            id=profile_id,
+            name=payload.name,
+            username=payload.username,
+            secret_provider=provider,
+            encrypted_password=None,
+            secret_ref=payload.secret_ref,
+            domain=payload.domain,
+            description=payload.description,
+        )
 
     def get_config(self) -> AppConfig:
         with self._lock:
@@ -169,7 +264,7 @@ class ConfigManager:
 
     def add_credential_profile(self, profile_create: CredentialProfileCreate) -> CredentialProfile:
         with self._lock:
-            profile = CredentialProfile(**profile_create.model_dump())
+            profile = self._build_profile_for_create(profile_create)
             config = self._config.model_copy(deep=True)
             config.credential_profiles.append(profile)
             config.updated_at = datetime.now(timezone.utc)
@@ -191,7 +286,8 @@ class ConfigManager:
             if index is None:
                 raise KeyError(f"Credential profile not found: {profile_id}")
 
-            updated = CredentialProfile(id=profile_id, **profile_update.model_dump())
+            existing = config.credential_profiles[index]
+            updated = self._build_profile_for_update(existing, profile_update, profile_id)
             config.credential_profiles[index] = updated
             config.updated_at = datetime.now(timezone.utc)
             self._write(config)

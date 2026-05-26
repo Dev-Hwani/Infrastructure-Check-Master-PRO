@@ -20,10 +20,30 @@ ProbeType = Literal[
     "rdp",
     "dns",
     "dns_a",
+    "dns_aaaa",
+    "dns_mx",
+    "dns_txt",
     "dns_srv",
     "dns_soa",
     "ntp",
 ]
+
+TCP_ONLY_PROBES = frozenset({"http", "https", "rdp"})
+UDP_ONLY_PROBES = frozenset(
+    {
+        "dns",
+        "dns_a",
+        "dns_aaaa",
+        "dns_mx",
+        "dns_txt",
+        "dns_srv",
+        "dns_soa",
+        "ntp",
+    }
+)
+
+CredentialSecretProvider = Literal["dpapi", "env", "azure_key_vault", "legacy_plaintext"]
+CredentialSecretProviderInput = Literal["dpapi", "env", "azure_key_vault"]
 
 
 class PortTarget(BaseModel):
@@ -31,6 +51,14 @@ class PortTarget(BaseModel):
     transport: TransportProtocol = "tcp"
     probe: ProbeType = "auto"
     retries: int | None = Field(default=None, ge=0, le=5)
+
+    @model_validator(mode="after")
+    def validate_probe_transport(self) -> "PortTarget":
+        if self.transport == "tcp" and self.probe in UDP_ONLY_PROBES:
+            raise ValueError(f"Probe '{self.probe}' requires UDP transport.")
+        if self.transport == "udp" and self.probe in TCP_ONLY_PROBES:
+            raise ValueError(f"Probe '{self.probe}' requires TCP transport.")
+        return self
 
 
 class TargetTemplate(BaseModel):
@@ -127,11 +155,14 @@ class CredentialProfile(BaseModel):
     id: str = Field(default_factory=lambda: uuid4().hex[:12])
     name: str = Field(min_length=1, max_length=100)
     username: str = Field(min_length=1, max_length=255)
-    password: str = Field(min_length=1, max_length=255)
+    secret_provider: CredentialSecretProvider = "dpapi"
+    encrypted_password: str | None = Field(default=None, max_length=4000)
+    secret_ref: str | None = Field(default=None, max_length=1024)
     domain: str | None = Field(default=None, max_length=120)
     description: str | None = Field(default=None, max_length=300)
+    legacy_password: str | None = Field(default=None, validation_alias="password", exclude=True)
 
-    @field_validator("name", "username", "password")
+    @field_validator("name", "username")
     @classmethod
     def validate_required_text(cls, value: str) -> str:
         stripped = value.strip()
@@ -139,7 +170,7 @@ class CredentialProfile(BaseModel):
             raise ValueError("Field cannot be empty.")
         return stripped
 
-    @field_validator("domain", "description")
+    @field_validator("domain", "description", "encrypted_password", "secret_ref", "legacy_password")
     @classmethod
     def validate_optional_text(cls, value: str | None) -> str | None:
         if value is None:
@@ -147,41 +178,72 @@ class CredentialProfile(BaseModel):
         stripped = value.strip()
         return stripped or None
 
+    @model_validator(mode="after")
+    def validate_secret_fields(self) -> "CredentialProfile":
+        if self.secret_provider == "dpapi":
+            if not self.encrypted_password and not self.legacy_password:
+                raise ValueError("DPAPI profile requires encrypted_password.")
+        elif self.secret_provider in {"env", "azure_key_vault"}:
+            if not self.secret_ref:
+                raise ValueError(f"{self.secret_provider} profile requires secret_ref.")
+        elif self.secret_provider == "legacy_plaintext":
+            if not self.legacy_password:
+                raise ValueError("legacy_plaintext profile requires password.")
+        return self
+
 
 class CredentialProfileCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     username: str = Field(min_length=1, max_length=255)
-    password: str = Field(min_length=1, max_length=255)
+    secret_provider: CredentialSecretProviderInput = "dpapi"
+    password: str | None = Field(default=None, min_length=1, max_length=255)
+    secret_ref: str | None = Field(default=None, max_length=1024)
     domain: str | None = Field(default=None, max_length=120)
     description: str | None = Field(default=None, max_length=300)
 
-    @field_validator("name", "username", "password")
+    @field_validator("name", "username")
     @classmethod
     def validate_required_text(cls, value: str) -> str:
         return CredentialProfile.validate_required_text(value)
 
-    @field_validator("domain", "description")
+    @field_validator("password", "secret_ref", "domain", "description")
     @classmethod
     def validate_optional_text(cls, value: str | None) -> str | None:
         return CredentialProfile.validate_optional_text(value)
+
+    @model_validator(mode="after")
+    def validate_secret_input(self) -> "CredentialProfileCreate":
+        if self.secret_provider == "dpapi" and not self.password:
+            raise ValueError("password is required when secret_provider=dpapi.")
+        if self.secret_provider in {"env", "azure_key_vault"} and not self.secret_ref:
+            raise ValueError("secret_ref is required for external secret providers.")
+        return self
 
 
 class CredentialProfileUpdate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     username: str = Field(min_length=1, max_length=255)
-    password: str = Field(min_length=1, max_length=255)
+    secret_provider: CredentialSecretProviderInput = "dpapi"
+    password: str | None = Field(default=None, min_length=1, max_length=255)
+    secret_ref: str | None = Field(default=None, max_length=1024)
     domain: str | None = Field(default=None, max_length=120)
     description: str | None = Field(default=None, max_length=300)
 
-    @field_validator("name", "username", "password")
+    @field_validator("name", "username")
     @classmethod
     def validate_required_text(cls, value: str) -> str:
         return CredentialProfile.validate_required_text(value)
 
-    @field_validator("domain", "description")
+    @field_validator("password", "secret_ref", "domain", "description")
     @classmethod
     def validate_optional_text(cls, value: str | None) -> str | None:
         return CredentialProfile.validate_optional_text(value)
+
+    @model_validator(mode="after")
+    def validate_secret_input(self) -> "CredentialProfileUpdate":
+        if self.secret_provider in {"env", "azure_key_vault"} and not self.secret_ref:
+            raise ValueError("secret_ref is required for external secret providers.")
+        return self
 
 
 class ServerTarget(BaseModel):
