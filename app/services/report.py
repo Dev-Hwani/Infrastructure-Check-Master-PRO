@@ -15,15 +15,22 @@ def build_excel_report(payload: dict[str, Any]) -> bytes:
     flattened = []
     checked_at = payload.get("checked_at")
     for row in rows:
+        probe = row.get("probe_result") or {}
         flattened.append(
             {
                 "Checked At (UTC)": checked_at,
                 "Server Name": row.get("server_name"),
                 "Host": row.get("host"),
                 "Port": row.get("port"),
+                "Transport": row.get("transport"),
                 "Status": row.get("status"),
+                "Reason Code": row.get("reason_code"),
+                "Probe Type": row.get("probe_type"),
+                "Probe Status": probe.get("probe_status"),
                 "Detail": row.get("detail"),
                 "Latency (ms)": row.get("latency_ms"),
+                "Total Latency (ms)": row.get("total_latency_ms"),
+                "Attempt Count": row.get("attempt_count"),
             }
         )
 
@@ -41,8 +48,14 @@ def build_excel_report(payload: dict[str, Any]) -> bytes:
 
         status_fills = {
             "OPEN": PatternFill("solid", fgColor="DCFCE7"),
+            "UDP_OPEN_OR_FILTERED": PatternFill("solid", fgColor="E0F2FE"),
             "REFUSED": PatternFill("solid", fgColor="FEE2E2"),
+            "UDP_CLOSED": PatternFill("solid", fgColor="FEE2E2"),
             "TIMEOUT": PatternFill("solid", fgColor="FEE2E2"),
+            "FILTERED": PatternFill("solid", fgColor="FECACA"),
+            "NO_ROUTE": PatternFill("solid", fgColor="FCA5A5"),
+            "HOST_UNREACHABLE": PatternFill("solid", fgColor="FECACA"),
+            "NETWORK_UNREACHABLE": PatternFill("solid", fgColor="FECACA"),
             "UNKNOWN_HOST": PatternFill("solid", fgColor="FDE68A"),
             "ERROR": PatternFill("solid", fgColor="FECACA"),
         }
@@ -56,17 +69,23 @@ def build_excel_report(payload: dict[str, Any]) -> bytes:
         for row in ws.iter_rows(min_row=2, max_row=ws.max_row, min_col=1, max_col=ws.max_column):
             for cell in row:
                 cell.border = border
-                if cell.column == 5 and cell.value in status_fills:
+                if cell.column == 6 and cell.value in status_fills:
                     cell.fill = status_fills[cell.value]
 
         widths = {
             "A": 24,
-            "B": 20,
+            "B": 18,
             "C": 18,
-            "D": 10,
+            "D": 8,
             "E": 14,
-            "F": 50,
-            "G": 12,
+            "F": 18,
+            "G": 18,
+            "H": 12,
+            "I": 14,
+            "J": 50,
+            "K": 12,
+            "L": 16,
+            "M": 12,
         }
         for col, width in widths.items():
             ws.column_dimensions[col].width = width
@@ -75,4 +94,3 @@ def build_excel_report(payload: dict[str, Any]) -> bytes:
 
     output.seek(0)
     return output.getvalue()
-

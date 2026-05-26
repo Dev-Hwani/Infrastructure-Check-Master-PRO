@@ -6,7 +6,13 @@ const statusRowClassMap = {
   OPEN: "status-open",
   REFUSED: "status-refused",
   TIMEOUT: "status-timeout",
+  FILTERED: "status-timeout",
+  NO_ROUTE: "status-unknown",
+  HOST_UNREACHABLE: "status-unknown",
+  NETWORK_UNREACHABLE: "status-unknown",
   UNKNOWN_HOST: "status-unknown",
+  UDP_OPEN_OR_FILTERED: "status-unknown",
+  UDP_CLOSED: "status-refused",
   ERROR: "status-error",
 };
 
@@ -87,12 +93,19 @@ function updateMetricCards(payload) {
 function updateStatusChips(payload) {
   const counts = payload.summary?.status_counts || {};
   const serviceCounts = payload.service_checks?.summary?.status_counts || {};
+  const timeoutLike = (counts.TIMEOUT ?? 0) + (counts.FILTERED ?? 0);
+  const unreachable =
+    (counts.UNKNOWN_HOST ?? 0) +
+    (counts.NO_ROUTE ?? 0) +
+    (counts.HOST_UNREACHABLE ?? 0) +
+    (counts.NETWORK_UNREACHABLE ?? 0);
+  const errorLike = (counts.ERROR ?? 0) + (counts.UDP_CLOSED ?? 0);
 
   document.getElementById("statusOpenCount").textContent = counts.OPEN ?? 0;
   document.getElementById("statusRefusedCount").textContent = counts.REFUSED ?? 0;
-  document.getElementById("statusTimeoutCount").textContent = counts.TIMEOUT ?? 0;
-  document.getElementById("statusUnknownCount").textContent = counts.UNKNOWN_HOST ?? 0;
-  document.getElementById("statusErrorCount").textContent = counts.ERROR ?? 0;
+  document.getElementById("statusTimeoutCount").textContent = timeoutLike;
+  document.getElementById("statusUnknownCount").textContent = unreachable;
+  document.getElementById("statusErrorCount").textContent = errorLike;
   document.getElementById("serviceStoppedCount").textContent = serviceCounts.STOPPED ?? 0;
 }
 
@@ -134,14 +147,20 @@ function renderCheckResults(results) {
   tbody.innerHTML = results
     .map((item) => {
       const rowClass = statusRowClassMap[item.status] || "status-error";
+      const transport = (item.transport || "tcp").toUpperCase();
+      const probe = item.probe_result || {};
+      const probeLabel =
+        probe.probe_status && probe.probe_status !== "SKIPPED"
+          ? ` | Probe ${probe.probe_status}: ${probe.probe_detail || "-"}`
+          : "";
       return `
         <tr class="${rowClass}">
           <td>${item.server_name}</td>
           <td>${item.host}</td>
-          <td>${item.port}</td>
+          <td>${item.port} <span class="text-muted">(${transport})</span></td>
           <td><span class="badge status-badge">${item.status}</span></td>
           <td>${item.latency_ms}</td>
-          <td>${item.detail || "-"}</td>
+          <td>${item.detail || "-"}${probeLabel}</td>
         </tr>
       `;
     })
@@ -178,11 +197,12 @@ function renderServiceResults(serviceChecks) {
 function updateSummary(payload) {
   const summary = payload.summary || {};
   const counts = summary.status_counts || {};
+  const probeCounts = summary.probe_status_counts || {};
   const svc = payload.service_checks?.summary?.status_counts || {};
   const duration = Number(summary.duration_ms || 0).toFixed(2);
   document.getElementById("summaryText").textContent =
     `완료 ${summary.total_checks ?? 0}건 | OPEN ${counts.OPEN ?? 0} | REFUSED ${counts.REFUSED ?? 0} | ` +
-    `TIMEOUT ${counts.TIMEOUT ?? 0} | UNKNOWN_HOST ${counts.UNKNOWN_HOST ?? 0} | 서비스 STOPPED ${svc.STOPPED ?? 0} | ${duration}ms`;
+    `FILTERED ${counts.FILTERED ?? 0} | NO_ROUTE ${counts.NO_ROUTE ?? 0} | PROBE_OK ${probeCounts.PROBE_OK ?? 0} | 서비스 STOPPED ${svc.STOPPED ?? 0} | ${duration}ms`;
 }
 
 function resetServerForm() {
@@ -469,4 +489,3 @@ async function bootstrap() {
 }
 
 bootstrap();
-

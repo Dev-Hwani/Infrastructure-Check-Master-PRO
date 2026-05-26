@@ -86,7 +86,13 @@ async def run_check() -> dict[str, Any]:
 
     # PRD requirement: timeout is fixed at exactly 2.0 seconds.
     timeout_seconds = 2.0
-    port_task = asyncio.create_task(run_port_sweep(config.servers, timeout_seconds=timeout_seconds))
+    port_task = asyncio.create_task(
+        run_port_sweep(
+            config.servers,
+            timeout_seconds=timeout_seconds,
+            default_retries=config.port_check_retries,
+        )
+    )
     local_task = asyncio.create_task(asyncio.to_thread(collect_local_metrics))
     remote_task = asyncio.create_task(collect_remote_metrics(config.servers))
     service_task = asyncio.create_task(run_service_sweep(config.servers))
@@ -101,6 +107,7 @@ async def run_check() -> dict[str, Any]:
     payload = {
         "checked_at": datetime.now(timezone.utc).isoformat(),
         "timeout_seconds": timeout_seconds,
+        "port_check_retries": config.port_check_retries,
         "summary": port_checks["summary"],
         "local_metrics": local_metrics,
         "remote_metrics": remote_metrics,
