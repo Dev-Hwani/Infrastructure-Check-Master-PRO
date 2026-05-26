@@ -46,6 +46,14 @@ const state = {
   servers: [],
   draftPortTargets: [],
   editingDraftTargetIndex: null,
+  templates: [],
+  credentialProfiles: [],
+  results: [],
+  filteredResults: [],
+  resultView: {
+    rowHeight: 92,
+    overscan: 6,
+  },
 };
 
 const statusRowClassMap = {
@@ -183,9 +191,18 @@ function normalizePortTarget(input) {
 
   if (!["tcp", "udp"].includes(transport)) return null;
   if (!PROBE_OPTIONS.includes(probe)) return null;
-  if (!Number.isInteger(retries) || retries < 0 || retries > 5) return null;
+  if (retries < 0 || retries > 5) return null;
   if (!isProbeAllowedByTransport(probe, transport)) return null;
   return { port, transport, probe, retries };
+}
+
+function normalizeServerPortTarget(item) {
+  return normalizePortTarget({
+    port: item.port,
+    transport: item.transport || "tcp",
+    probe: item.probe || "auto",
+    retries: Number.isInteger(item.retries) ? item.retries : 2,
+  });
 }
 
 function sortDraftPortTargets() {
@@ -341,13 +358,9 @@ function applyRoleTemplate(roleKey) {
 
   let added = 0;
   let updated = 0;
-  let skipped = 0;
   for (const raw of template) {
     const target = normalizePortTarget(raw);
-    if (!target) {
-      skipped += 1;
-      continue;
-    }
+    if (!target) continue;
     const key = draftTargetKey(target);
     const idx = state.draftPortTargets.findIndex((item) => draftTargetKey(item) === key);
     if (idx >= 0) {
@@ -365,8 +378,299 @@ function applyRoleTemplate(roleKey) {
   notify({
     type: "success",
     title: `${roleKey} 템플릿 적용`,
-    message: `추가 ${added}건, 갱신 ${updated}건, 제외 ${skipped}건`,
+    message: `추가 ${added}건, 갱신 ${updated}건`,
   });
+}
+
+function resetTemplateForm() {
+  document.getElementById("editingTemplateId").value = "";
+  document.getElementById("templateName").value = "";
+  document.getElementById("templateDescription").value = "";
+  document.getElementById("saveTemplateBtn").textContent = "템플릿 저장";
+}
+
+function renderTemplateList() {
+  const tbody = document.getElementById("templateListBody");
+  if (!state.templates.length) {
+    tbody.innerHTML = '<tr><td colspan="4" class="text-muted py-2">저장된 사용자 템플릿이 없습니다.</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = state.templates
+    .map(
+      (template) => `
+      <tr>
+        <td>${template.name}</td>
+        <td>${template.description || "-"}</td>
+        <td>${(template.port_targets || []).length}</td>
+        <td class="d-flex gap-1">
+          <button class="btn btn-sm btn-outline-success" data-action="apply-template" data-id="${template.id}">적용</button>
+          <button class="btn btn-sm btn-outline-info" data-action="edit-template" data-id="${template.id}">수정</button>
+          <button class="btn btn-sm btn-outline-danger" data-action="delete-template" data-id="${template.id}">삭제</button>
+        </td>
+      </tr>
+    `
+    )
+    .join("");
+}
+
+function applyCustomTemplate(template) {
+  if (!template || !Array.isArray(template.port_targets)) return;
+  let applied = 0;
+  for (const item of template.port_targets) {
+    const target = normalizeServerPortTarget(item);
+    if (!target) continue;
+    addOrReplaceDraftPortTarget(target);
+    applied += 1;
+  }
+  renderDraftPortTargets();
+  notify({
+    type: "success",
+    title: "사용자 템플릿 적용",
+    message: `${template.name} 템플릿에서 ${applied}개 타깃을 반영했습니다.`,
+  });
+}
+
+async function saveTemplateFromDraft() {
+  const name = document.getElementById("templateName").value.trim();
+  const description = document.getElementById("templateDescription").value.trim();
+  const editingId = document.getElementById("editingTemplateId").value.trim();
+
+  if (!name) {
+    notify({ type: "warning", title: "입력값 확인", message: "템플릿명을 입력해 주세요." });
+    return;
+  }
+  if (!state.draftPortTargets.length) {
+    notify({
+      type: "warning",
+      title: "타깃 없음",
+      message: "현재 고급 타깃 목록이 비어 있습니다. 타깃을 추가한 뒤 저장해 주세요.",
+    });
+    return;
+  }
+
+  const payload = {
+    name,
+    description: description || null,
+    port_targets: state.draftPortTargets,
+  };
+
+  try {
+    if (editingId) {
+      await fetchJson(`/api/templates/${editingId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      notify({ type: "success", title: "템플릿 수정 완료", message: `${name} 템플릿을 수정했습니다.` });
+    } else {
+      await fetchJson("/api/templates", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      notify({ type: "success", title: "템플릿 저장 완료", message: `${name} 템플릿을 저장했습니다.` });
+    }
+    resetTemplateForm();
+    await loadConfig({ silent: true });
+  } catch (error) {
+    notify({ type: "error", title: "템플릿 저장 실패", message: error.message, timeout: 5200 });
+  }
+}
+
+async function onTemplateListClick(event) {
+  const target = event.target;
+  if (!(target instanceof HTMLElement)) return;
+  const action = target.dataset.action;
+  const id = target.dataset.id;
+  if (!action || !id) return;
+
+  const template = state.templates.find((item) => item.id === id);
+  if (!template) return;
+
+  if (action === "apply-template") {
+    applyCustomTemplate(template);
+    return;
+  }
+
+  if (action === "edit-template") {
+    document.getElementById("editingTemplateId").value = template.id;
+    document.getElementById("templateName").value = template.name || "";
+    document.getElementById("templateDescription").value = template.description || "";
+    document.getElementById("saveTemplateBtn").textContent = "템플릿 수정";
+    state.draftPortTargets = (template.port_targets || [])
+      .map(normalizeServerPortTarget)
+      .filter((item) => item !== null);
+    sortDraftPortTargets();
+    renderDraftPortTargets();
+    notify({
+      type: "info",
+      title: "템플릿 편집 모드",
+      message: `${template.name} 템플릿 내용을 폼에 불러왔습니다.`,
+    });
+    return;
+  }
+
+  if (action === "delete-template") {
+    const confirmed = window.confirm(`${template.name} 템플릿을 삭제할까요?`);
+    if (!confirmed) return;
+    try {
+      await fetchJson(`/api/templates/${id}`, { method: "DELETE" });
+      resetTemplateForm();
+      await loadConfig({ silent: true });
+      notify({ type: "success", title: "템플릿 삭제 완료", message: `${template.name} 템플릿을 삭제했습니다.` });
+    } catch (error) {
+      notify({ type: "error", title: "템플릿 삭제 실패", message: error.message, timeout: 5200 });
+    }
+  }
+}
+
+function profileAccountText(profile) {
+  if (!profile) return "-";
+  if (profile.domain) return `${profile.domain}\\${profile.username}`;
+  return profile.username;
+}
+
+function renderCredentialProfileOptions(selectedValue = "") {
+  const select = document.getElementById("serverCredentialProfile");
+  const wanted = selectedValue ?? select.value;
+  const options = [
+    '<option value="">현재 실행 계정</option>',
+    ...state.credentialProfiles.map(
+      (profile) =>
+        `<option value="${profile.id}">${profile.name} (${profileAccountText(profile)})</option>`
+    ),
+  ];
+  select.innerHTML = options.join("");
+  const exists = state.credentialProfiles.some((profile) => profile.id === wanted);
+  select.value = exists ? wanted : "";
+}
+
+function renderCredentialProfileList() {
+  const tbody = document.getElementById("credentialProfileListBody");
+  if (!state.credentialProfiles.length) {
+    tbody.innerHTML = '<tr><td colspan="4" class="text-muted py-2">등록된 프로파일이 없습니다.</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = state.credentialProfiles
+    .map(
+      (profile) => `
+      <tr>
+        <td>${profile.name}</td>
+        <td>${profileAccountText(profile)}</td>
+        <td>${profile.description || "-"}</td>
+        <td class="d-flex gap-1">
+          <button class="btn btn-sm btn-outline-info" data-action="edit-profile" data-id="${profile.id}">수정</button>
+          <button class="btn btn-sm btn-outline-danger" data-action="delete-profile" data-id="${profile.id}">삭제</button>
+        </td>
+      </tr>
+    `
+    )
+    .join("");
+}
+
+function resetCredentialProfileForm() {
+  document.getElementById("editingCredentialProfileId").value = "";
+  document.getElementById("credentialProfileName").value = "";
+  document.getElementById("credentialProfileUsername").value = "";
+  document.getElementById("credentialProfileDomain").value = "";
+  document.getElementById("credentialProfilePassword").value = "";
+  document.getElementById("credentialProfileDescription").value = "";
+}
+
+function fillCredentialProfileForm(profile) {
+  document.getElementById("editingCredentialProfileId").value = profile.id;
+  document.getElementById("credentialProfileName").value = profile.name || "";
+  document.getElementById("credentialProfileUsername").value = profile.username || "";
+  document.getElementById("credentialProfileDomain").value = profile.domain || "";
+  document.getElementById("credentialProfilePassword").value = profile.password || "";
+  document.getElementById("credentialProfileDescription").value = profile.description || "";
+}
+
+async function submitCredentialProfileForm(event) {
+  event.preventDefault();
+  const id = document.getElementById("editingCredentialProfileId").value.trim();
+  const name = document.getElementById("credentialProfileName").value.trim();
+  const username = document.getElementById("credentialProfileUsername").value.trim();
+  const password = document.getElementById("credentialProfilePassword").value.trim();
+  const domain = document.getElementById("credentialProfileDomain").value.trim();
+  const description = document.getElementById("credentialProfileDescription").value.trim();
+
+  if (!name || !username || !password) {
+    notify({
+      type: "warning",
+      title: "입력값 확인",
+      message: "프로파일명, 사용자명, 비밀번호는 필수입니다.",
+    });
+    return;
+  }
+
+  const payload = {
+    name,
+    username,
+    password,
+    domain: domain || null,
+    description: description || null,
+  };
+
+  try {
+    if (id) {
+      await fetchJson(`/api/credential-profiles/${id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      notify({ type: "success", title: "프로파일 수정 완료", message: `${name} 프로파일을 수정했습니다.` });
+    } else {
+      await fetchJson("/api/credential-profiles", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      notify({ type: "success", title: "프로파일 저장 완료", message: `${name} 프로파일을 저장했습니다.` });
+    }
+
+    resetCredentialProfileForm();
+    await loadConfig({ silent: true });
+  } catch (error) {
+    notify({
+      type: "error",
+      title: "프로파일 저장 실패",
+      message: error.message,
+      timeout: 5200,
+    });
+  }
+}
+
+async function onCredentialProfileListClick(event) {
+  const target = event.target;
+  if (!(target instanceof HTMLElement)) return;
+  const action = target.dataset.action;
+  const id = target.dataset.id;
+  if (!action || !id) return;
+
+  const profile = state.credentialProfiles.find((item) => item.id === id);
+  if (!profile) return;
+
+  if (action === "edit-profile") {
+    fillCredentialProfileForm(profile);
+    notify({ type: "info", title: "프로파일 편집", message: `${profile.name} 프로파일을 편집 중입니다.` });
+    return;
+  }
+
+  if (action === "delete-profile") {
+    const confirmed = window.confirm(`${profile.name} 프로파일을 삭제할까요?`);
+    if (!confirmed) return;
+    try {
+      await fetchJson(`/api/credential-profiles/${id}`, { method: "DELETE" });
+      resetCredentialProfileForm();
+      await loadConfig({ silent: true });
+      notify({ type: "success", title: "프로파일 삭제 완료", message: `${profile.name} 프로파일을 삭제했습니다.` });
+    } catch (error) {
+      notify({ type: "error", title: "프로파일 삭제 실패", message: error.message, timeout: 5200 });
+    }
+  }
 }
 
 function getRecommendedAction(row) {
@@ -382,15 +686,29 @@ function formatProbeInfo(item) {
   const probeMeta = probe.probe_meta || {};
   const metaParts = [];
 
-  if (Number.isInteger(probeMeta.query_type)) metaParts.push(`qtype=${probeMeta.query_type}`);
+  if (probeMeta.query_type_name) metaParts.push(`type=${probeMeta.query_type_name}`);
   if (Number.isInteger(probeMeta.rcode)) metaParts.push(`rcode=${probeMeta.rcode}`);
-  if (Number.isInteger(probeMeta.answer_count)) metaParts.push(`answer=${probeMeta.answer_count}`);
+  if (Number.isInteger(probeMeta.answer_count)) metaParts.push(`answers=${probeMeta.answer_count}`);
   if (Number.isInteger(probeMeta.version)) metaParts.push(`version=${probeMeta.version}`);
   if (Number.isInteger(probeMeta.stratum)) metaParts.push(`stratum=${probeMeta.stratum}`);
   if (Number.isInteger(probeMeta.mode)) metaParts.push(`mode=${probeMeta.mode}`);
+  if (probeMeta.parse_error) metaParts.push(`parse_error=${probeMeta.parse_error}`);
+
+  const answers = Array.isArray(probeMeta.answers) ? probeMeta.answers : [];
+  const answerText = answers
+    .slice(0, 2)
+    .map((answer) => {
+      const typeName = answer.type_name || "TYPE";
+      if (typeName === "A") return `A:${answer.address || "-"}`;
+      if (typeName === "SRV") return `SRV:${answer.port || "-"}->${answer.target || "-"}`;
+      if (typeName === "SOA") return `SOA:${answer.mname || "-"}`;
+      return `${typeName}:${answer.name || "-"}`;
+    })
+    .join(", ");
+  if (answerText) metaParts.push(answerText);
 
   if (metaParts.length > 0) {
-    return `Probe ${probeStatus}: ${probeDetail} (${metaParts.join(", ")})`;
+    return `Probe ${probeStatus}: ${probeDetail} (${metaParts.join(" | ")})`;
   }
   return `Probe ${probeStatus}: ${probeDetail}`;
 }
@@ -444,8 +762,7 @@ function updateStatusChips(payload) {
 function renderRemoteMetrics(remoteMetrics) {
   const tbody = document.getElementById("remoteMetricsBody");
   if (!Array.isArray(remoteMetrics) || remoteMetrics.length === 0) {
-    tbody.innerHTML =
-      '<tr><td colspan="5" class="text-muted py-3">아직 수집된 원격 리소스 데이터가 없습니다.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="5" class="text-muted py-3">아직 수집된 원격 리소스 데이터가 없습니다.</td></tr>';
     return;
   }
 
@@ -454,7 +771,9 @@ function renderRemoteMetrics(remoteMetrics) {
       const ok = item.status === "OK";
       const cpu = ok ? `${item.cpu_percent}%` : "-";
       const mem = ok ? `${item.memory_percent}%` : "-";
-      const detail = ok ? "정상" : item.detail || "오류";
+      const detailParts = [ok ? "정상" : item.detail || "오류"];
+      if (item.credential_profile) detailParts.push(`계정: ${item.credential_profile}`);
+      const detail = detailParts.join(" | ");
       const badgeClass = ok ? "text-bg-success" : "text-bg-danger";
       return `
         <tr>
@@ -463,41 +782,6 @@ function renderRemoteMetrics(remoteMetrics) {
           <td>${cpu}</td>
           <td>${mem}</td>
           <td><span class="badge ${badgeClass}">${detail}</span></td>
-        </tr>
-      `;
-    })
-    .join("");
-}
-
-function renderCheckResults(results) {
-  const tbody = document.getElementById("resultBody");
-  if (!Array.isArray(results) || results.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="7" class="text-muted py-3">점검 결과가 없습니다.</td></tr>';
-    return;
-  }
-
-  tbody.innerHTML = results
-    .map((item) => {
-      const rowClass = statusRowClassMap[item.status] || "status-error";
-      const transport = String(item.transport || "tcp").toUpperCase();
-      const probeText = formatProbeInfo(item);
-      const consistencyText = formatConsistency(item);
-      const attemptsText = formatAttemptSummary(item);
-      const consistencyClass = consistencyBadgeClass(item.consistency);
-      const detail = `${item.detail || "-"} | Reason: ${item.reason_code || "UNKNOWN"} | ${probeText} | Attempts: ${attemptsText}`;
-
-      return `
-        <tr class="${rowClass}">
-          <td>${item.server_name}</td>
-          <td>${item.host}</td>
-          <td>${item.port} <span class="text-muted">(${transport})</span></td>
-          <td>
-            <span class="badge status-badge">${item.status}</span>
-            <div class="mt-1"><span class="badge ${consistencyClass}">${consistencyText}</span></div>
-          </td>
-          <td>${item.latency_ms}</td>
-          <td>${detail}</td>
-          <td>${getRecommendedAction(item)}</td>
         </tr>
       `;
     })
@@ -518,17 +802,116 @@ function renderServiceResults(serviceChecks) {
       if (item.status === "STOPPED") badgeClass = "text-bg-danger";
       if (item.status === "NOT_FOUND") badgeClass = "text-bg-warning";
       if (item.status === "ERROR") badgeClass = "text-bg-dark";
+      const detailParts = [item.detail || "-"];
+      if (item.credential_profile) detailParts.push(`계정: ${item.credential_profile}`);
       return `
         <tr>
           <td>${item.server_name}</td>
           <td>${item.host}</td>
           <td>${item.service_name}</td>
           <td><span class="badge ${badgeClass}">${item.status}</span></td>
-          <td>${item.detail || "-"}</td>
+          <td>${detailParts.join(" | ")}</td>
         </tr>
       `;
     })
     .join("");
+}
+
+function buildResultRowHtml(item) {
+  const rowClass = statusRowClassMap[item.status] || "status-error";
+  const transport = String(item.transport || "tcp").toUpperCase();
+  const probeText = formatProbeInfo(item);
+  const consistencyText = formatConsistency(item);
+  const attemptsText = formatAttemptSummary(item);
+  const consistencyClass = consistencyBadgeClass(item.consistency);
+  const detail = `${item.detail || "-"} | Reason: ${item.reason_code || "UNKNOWN"} | ${probeText} | Attempts: ${attemptsText}`;
+  return `
+    <tr class="${rowClass} virtual-row">
+      <td>${item.server_name}</td>
+      <td>${item.host}</td>
+      <td>${item.port} <span class="text-muted">(${transport})</span></td>
+      <td>
+        <span class="badge status-badge">${item.status}</span>
+        <div class="mt-1"><span class="badge ${consistencyClass}">${consistencyText}</span></div>
+      </td>
+      <td>${item.latency_ms}</td>
+      <td><div class="detail-truncate">${detail}</div></td>
+      <td>${getRecommendedAction(item)}</td>
+    </tr>
+  `;
+}
+
+function updateResultFilterMeta() {
+  const meta = document.getElementById("resultFilterMeta");
+  meta.textContent = `${state.filteredResults.length} / ${state.results.length}`;
+}
+
+function applyResultFilters() {
+  const statusFilter = document.getElementById("resultStatusFilter").value;
+  const transportFilter = document.getElementById("resultTransportFilter").value;
+  const keyword = document.getElementById("resultSearchInput").value.trim().toLowerCase();
+
+  state.filteredResults = state.results.filter((item) => {
+    if (statusFilter !== "ALL" && item.status !== statusFilter) return false;
+    if (transportFilter !== "ALL" && String(item.transport || "").toLowerCase() !== transportFilter) return false;
+    if (!keyword) return true;
+    const text = [
+      item.server_name,
+      item.host,
+      item.status,
+      item.reason_code,
+      item.detail,
+      item.recommended_action,
+    ]
+      .join(" ")
+      .toLowerCase();
+    return text.includes(keyword);
+  });
+  updateResultFilterMeta();
+}
+
+function renderVirtualResultRows() {
+  const tbody = document.getElementById("resultBody");
+  const container = document.getElementById("resultTableContainer");
+  const total = state.filteredResults.length;
+  const colSpan = 7;
+
+  if (total === 0) {
+    const emptyMessage =
+      state.results.length === 0
+        ? "[종합 점검 시작] 버튼을 클릭하세요."
+        : "조건에 맞는 결과가 없습니다.";
+    tbody.innerHTML = `<tr><td colspan="7" class="text-muted py-3">${emptyMessage}</td></tr>`;
+    return;
+  }
+
+  const rowHeight = state.resultView.rowHeight;
+  const overscan = state.resultView.overscan;
+  const viewportHeight = Math.max(container.clientHeight, rowHeight * 2);
+  const visibleCount = Math.ceil(viewportHeight / rowHeight) + overscan * 2;
+  const start = Math.max(0, Math.floor(container.scrollTop / rowHeight) - overscan);
+  const end = Math.min(total, start + visibleCount);
+
+  const topHeight = start * rowHeight;
+  const bottomHeight = (total - end) * rowHeight;
+  const rows = state.filteredResults.slice(start, end).map(buildResultRowHtml).join("");
+
+  const topSpacer =
+    topHeight > 0
+      ? `<tr class="spacer-row"><td colspan="${colSpan}" style="height:${topHeight}px;"></td></tr>`
+      : "";
+  const bottomSpacer =
+    bottomHeight > 0
+      ? `<tr class="spacer-row"><td colspan="${colSpan}" style="height:${bottomHeight}px;"></td></tr>`
+      : "";
+  tbody.innerHTML = `${topSpacer}${rows}${bottomSpacer}`;
+}
+
+function refreshResultView({ resetScroll = false } = {}) {
+  applyResultFilters();
+  const container = document.getElementById("resultTableContainer");
+  if (resetScroll) container.scrollTop = 0;
+  renderVirtualResultRows();
 }
 
 function updateSummary(payload) {
@@ -545,42 +928,6 @@ function updateSummary(payload) {
     `FILTERED ${counts.FILTERED ?? 0} | NO_ROUTE ${counts.NO_ROUTE ?? 0} | PROBE_OK ${probeCounts.PROBE_OK ?? 0} | ` +
     `STABLE ${consistencyCounts.STABLE ?? 0} | FLAKY ${consistencyCounts.FLAKY ?? 0} | ` +
     `서비스 STOPPED ${svc.STOPPED ?? 0} | ${duration}ms`;
-}
-
-function resetServerForm() {
-  document.getElementById("editingServerId").value = "";
-  document.getElementById("serverName").value = "";
-  document.getElementById("serverHost").value = "";
-  document.getElementById("serverPorts").value = "";
-  document.getElementById("serverServices").value = "";
-  document.getElementById("remoteMetricsEnabled").checked = true;
-  state.draftPortTargets = [];
-  renderDraftPortTargets();
-  resetAdvancedPortTargetInputs();
-}
-
-function normalizeServerPortTarget(item) {
-  return normalizePortTarget({
-    port: item.port,
-    transport: item.transport || "tcp",
-    probe: item.probe || "auto",
-    retries: Number.isInteger(item.retries) ? item.retries : 2,
-  });
-}
-
-function fillServerForm(server) {
-  document.getElementById("editingServerId").value = server.id;
-  document.getElementById("serverName").value = server.name;
-  document.getElementById("serverHost").value = server.host;
-  document.getElementById("serverPorts").value = (server.ports || []).join(",");
-  document.getElementById("serverServices").value = (server.services || []).join(",");
-  document.getElementById("remoteMetricsEnabled").checked = !!server.enable_remote_metrics;
-  state.draftPortTargets = (server.port_targets || [])
-    .map(normalizeServerPortTarget)
-    .filter((target) => target !== null);
-  sortDraftPortTargets();
-  renderDraftPortTargets();
-  resetAdvancedPortTargetInputs();
 }
 
 function summarizeAdvancedTargets(portTargets) {
@@ -619,15 +966,50 @@ function renderServerList() {
     .join("");
 }
 
+function resetServerForm() {
+  document.getElementById("editingServerId").value = "";
+  document.getElementById("serverName").value = "";
+  document.getElementById("serverHost").value = "";
+  document.getElementById("serverPorts").value = "";
+  document.getElementById("serverServices").value = "";
+  document.getElementById("remoteMetricsEnabled").checked = true;
+  renderCredentialProfileOptions("");
+  state.draftPortTargets = [];
+  renderDraftPortTargets();
+  resetAdvancedPortTargetInputs();
+}
+
+function fillServerForm(server) {
+  document.getElementById("editingServerId").value = server.id;
+  document.getElementById("serverName").value = server.name;
+  document.getElementById("serverHost").value = server.host;
+  document.getElementById("serverPorts").value = (server.ports || []).join(",");
+  document.getElementById("serverServices").value = (server.services || []).join(",");
+  document.getElementById("remoteMetricsEnabled").checked = !!server.enable_remote_metrics;
+  renderCredentialProfileOptions(server.credential_profile_id || "");
+  state.draftPortTargets = (server.port_targets || [])
+    .map(normalizeServerPortTarget)
+    .filter((target) => target !== null);
+  sortDraftPortTargets();
+  renderDraftPortTargets();
+  resetAdvancedPortTargetInputs();
+}
+
 async function loadConfig({ silent = false } = {}) {
   const config = await fetchJson("/api/config");
   state.servers = config.servers || [];
+  state.templates = config.templates || [];
+  state.credentialProfiles = config.credential_profiles || [];
   renderServerList();
+  renderTemplateList();
+  renderCredentialProfileList();
+  renderCredentialProfileOptions(document.getElementById("serverCredentialProfile").value || "");
+
   if (!silent) {
     notify({
       type: "success",
       title: "설정 로드 완료",
-      message: `등록된 점검 대상 ${state.servers.length}개를 불러왔습니다.`,
+      message: `서버 ${state.servers.length}개, 사용자 템플릿 ${state.templates.length}개, 계정 프로파일 ${state.credentialProfiles.length}개를 불러왔습니다.`,
     });
   }
 }
@@ -649,8 +1031,9 @@ async function handleRunCheck() {
     updateMetricCards(payload);
     updateStatusChips(payload);
     renderRemoteMetrics(payload.remote_metrics);
-    renderCheckResults(payload.port_checks.results);
     renderServiceResults(payload.service_checks);
+    state.results = Array.isArray(payload.port_checks?.results) ? payload.port_checks.results : [];
+    refreshResultView({ resetScroll: true });
     updateSummary(payload);
     document.getElementById("lastChecked").textContent = `최근 점검: ${formatDateTime(payload.checked_at)}`;
 
@@ -732,14 +1115,10 @@ async function submitServerForm(event) {
   const ports = parsePorts(document.getElementById("serverPorts").value);
   const services = parseItems(document.getElementById("serverServices").value);
   const enableRemoteMetrics = document.getElementById("remoteMetricsEnabled").checked;
+  const credentialProfileId = document.getElementById("serverCredentialProfile").value || null;
 
   if (!name || !host) {
-    notify({
-      type: "warning",
-      title: "입력값 확인",
-      message: "서버명과 IP/Host는 필수입니다.",
-      timeout: 4600,
-    });
+    notify({ type: "warning", title: "입력값 확인", message: "서버명과 IP/Host는 필수입니다." });
     return;
   }
   if (ports.length === 0 && state.draftPortTargets.length === 0) {
@@ -747,7 +1126,6 @@ async function submitServerForm(event) {
       type: "warning",
       title: "포트 대상 없음",
       message: "기본 포트 목록 또는 고급 포트 타깃 중 하나 이상을 입력해 주세요.",
-      timeout: 4600,
     });
     return;
   }
@@ -759,6 +1137,7 @@ async function submitServerForm(event) {
     port_targets: state.draftPortTargets,
     services,
     enable_remote_metrics: enableRemoteMetrics,
+    credential_profile_id: credentialProfileId,
   };
 
   try {
@@ -768,33 +1147,20 @@ async function submitServerForm(event) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      notify({
-        type: "success",
-        title: "수정 완료",
-        message: `${name} 서버 설정이 업데이트되었습니다.`,
-      });
+      notify({ type: "success", title: "수정 완료", message: `${name} 서버 설정이 업데이트되었습니다.` });
     } else {
       await fetchJson("/api/servers", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      notify({
-        type: "success",
-        title: "등록 완료",
-        message: `${name} 서버가 점검 대상에 추가되었습니다.`,
-      });
+      notify({ type: "success", title: "등록 완료", message: `${name} 서버가 점검 대상에 추가되었습니다.` });
     }
 
     resetServerForm();
     await loadConfig({ silent: true });
   } catch (error) {
-    notify({
-      type: "error",
-      title: "저장 실패",
-      message: error.message,
-      timeout: 5200,
-    });
+    notify({ type: "error", title: "저장 실패", message: error.message, timeout: 5200 });
   }
 }
 
@@ -811,11 +1177,7 @@ async function onServerListClick(event) {
 
   if (action === "edit") {
     fillServerForm(server);
-    notify({
-      type: "info",
-      title: "수정 모드",
-      message: `${server.name} 항목을 수정 중입니다. 값 변경 후 저장해 주세요.`,
-    });
+    notify({ type: "info", title: "수정 모드", message: `${server.name} 항목을 수정 중입니다.` });
     return;
   }
 
@@ -827,17 +1189,9 @@ async function onServerListClick(event) {
       await fetchJson(`/api/servers/${id}`, { method: "DELETE" });
       if (document.getElementById("editingServerId").value === id) resetServerForm();
       await loadConfig({ silent: true });
-      notify({
-        type: "success",
-        title: "삭제 완료",
-        message: `${server.name} 항목을 삭제했습니다.`,
-      });
+      notify({ type: "success", title: "삭제 완료", message: `${server.name} 항목을 삭제했습니다.` });
     } catch (error) {
-      notify({
-        type: "error",
-        title: "삭제 실패",
-        message: error.message,
-      });
+      notify({ type: "error", title: "삭제 실패", message: error.message, timeout: 5200 });
     }
   }
 }
@@ -860,11 +1214,7 @@ function onDraftTargetTableClick(event) {
     fillAdvancedPortTargetInputs(draftTarget);
     setDraftTargetEditMode(index);
     renderDraftPortTargets();
-    notify({
-      type: "info",
-      title: "타깃 편집",
-      message: `${draftTarget.port}/${draftTarget.transport}/${draftTarget.probe} 항목을 편집 중입니다.`,
-    });
+    notify({ type: "info", title: "타깃 편집", message: `${draftTarget.port}/${draftTarget.transport}/${draftTarget.probe} 항목을 편집 중입니다.` });
   }
 }
 
@@ -881,6 +1231,14 @@ function onAdvancedTransportChange() {
   }
 }
 
+function onResultFiltersChanged() {
+  refreshResultView({ resetScroll: true });
+}
+
+function onResultTableScroll() {
+  renderVirtualResultRows();
+}
+
 async function bootstrap() {
   document.getElementById("checkBtn").addEventListener("click", handleRunCheck);
   document.getElementById("downloadBtn").addEventListener("click", handleDownloadReport);
@@ -892,25 +1250,39 @@ async function bootstrap() {
   document.getElementById("tplAdBtn").addEventListener("click", () => applyRoleTemplate("AD"));
   document.getElementById("tplWebBtn").addEventListener("click", () => applyRoleTemplate("WEB"));
   document.getElementById("tplDbBtn").addEventListener("click", () => applyRoleTemplate("DB"));
+  document.getElementById("templateListBody").addEventListener("click", onTemplateListClick);
+  document.getElementById("saveTemplateBtn").addEventListener("click", saveTemplateFromDraft);
+  document.getElementById("resetTemplateFormBtn").addEventListener("click", () => {
+    resetTemplateForm();
+    notify({ type: "info", title: "템플릿 폼 초기화", message: "템플릿 입력 폼을 초기화했습니다." });
+  });
+
+  document.getElementById("credentialProfileForm").addEventListener("submit", submitCredentialProfileForm);
+  document.getElementById("credentialProfileListBody").addEventListener("click", onCredentialProfileListClick);
+  document.getElementById("resetCredentialProfileFormBtn").addEventListener("click", () => {
+    resetCredentialProfileForm();
+    notify({ type: "info", title: "프로파일 폼 초기화", message: "자격증명 프로파일 입력 폼을 초기화했습니다." });
+  });
+
+  document.getElementById("resultSearchInput").addEventListener("input", onResultFiltersChanged);
+  document.getElementById("resultStatusFilter").addEventListener("change", onResultFiltersChanged);
+  document.getElementById("resultTransportFilter").addEventListener("change", onResultFiltersChanged);
+  document.getElementById("resultTableContainer").addEventListener("scroll", onResultTableScroll);
+
   document.getElementById("resetFormBtn").addEventListener("click", () => {
     resetServerForm();
-    notify({
-      type: "info",
-      title: "초기화 완료",
-      message: "입력 폼을 초기 상태로 되돌렸습니다.",
-    });
+    notify({ type: "info", title: "초기화 완료", message: "서버 입력 폼을 초기 상태로 되돌렸습니다." });
   });
 
   renderDraftPortTargets();
+  renderTemplateList();
+  renderCredentialProfileList();
+  renderCredentialProfileOptions("");
+  refreshResultView({ resetScroll: true });
   try {
     await loadConfig({ silent: false });
   } catch (error) {
-    notify({
-      type: "error",
-      title: "초기 로드 실패",
-      message: error.message,
-      timeout: 5200,
-    });
+    notify({ type: "error", title: "초기 로드 실패", message: error.message, timeout: 5200 });
   }
 }
 

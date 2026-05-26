@@ -7,7 +7,7 @@ import subprocess
 from datetime import datetime, timezone
 from typing import Any
 
-from ..models import ServerTarget
+from ..models import CredentialProfile, ServerTarget
 
 
 def _utc_now_iso() -> str:
@@ -37,24 +37,35 @@ def _run_powershell_script(script: str, timeout_seconds: float = 8.0) -> tuple[b
         return b"", str(exc).encode("utf-8", errors="ignore"), "EXEC_ERROR"
 
 
-async def _check_service(server: ServerTarget, service_name: str) -> dict[str, Any]:
-    if platform.system().lower() != "windows":
-        return {
-            "checked_at": _utc_now_iso(),
-            "server_id": server.id,
-            "server_name": server.name,
-            "host": server.host,
-            "service_name": service_name,
-            "status": "SKIPPED",
-            "detail": "Windows host required",
-        }
+def _resolved_username(profile: CredentialProfile) -> str:
+    if profile.domain:
+        return f"{profile.domain}\\{profile.username}"
+    return profile.username
 
-    host = _escape_ps_single_quote(server.host)
-    service = _escape_ps_single_quote(service_name)
-    script = f"""
+
+def _credential_preamble(profile: CredentialProfile | None) -> str:
+    if profile is None:
+        return "$cred = $null"
+    username = _escape_ps_single_quote(_resolved_username(profile))
+    password = _escape_ps_single_quote(profile.password)
+    return (
+        "$secPwd = ConvertTo-SecureString "
+        f"'{password}' -AsPlainText -Force; "
+        f"$cred = New-Object System.Management.Automation.PSCredential('{username}', $secPwd)"
+    )
+
+
+def _build_service_script(host: str, service: str, profile: CredentialProfile | None) -> str:
+    cred_init = _credential_preamble(profile)
+    return f"""
 $ErrorActionPreference = 'Stop'
+{cred_init}
 try {{
-    $svc = Get-Service -ComputerName '{host}' -Name '{service}'
+    if ($null -eq $cred) {{
+        $svc = Get-Service -ComputerName '{host}' -Name '{service}'
+    }} else {{
+        $svc = Get-Service -ComputerName '{host}' -Name '{service}' -Credential $cred
+    }}
     [PSCustomObject]@{{
         status = 'OK'
         service_state = $svc.Status.ToString()
@@ -66,7 +77,45 @@ try {{
     }} | ConvertTo-Json -Compress
 }}
 """.strip()
+
+
+async def _check_service(
+    server: ServerTarget,
+    service_name: str,
+    profile_lookup: dict[str, CredentialProfile],
+) -> dict[str, Any]:
+    if platform.system().lower() != "windows":
+        return {
+            "checked_at": _utc_now_iso(),
+            "server_id": server.id,
+            "server_name": server.name,
+            "host": server.host,
+            "service_name": service_name,
+            "status": "SKIPPED",
+            "detail": "Windows host required",
+            "credential_profile": server.credential_profile_id or "current_user",
+        }
+
+    profile: CredentialProfile | None = None
+    if server.credential_profile_id:
+        profile = profile_lookup.get(server.credential_profile_id)
+        if profile is None:
+            return {
+                "checked_at": _utc_now_iso(),
+                "server_id": server.id,
+                "server_name": server.name,
+                "host": server.host,
+                "service_name": service_name,
+                "status": "ERROR",
+                "detail": f"Credential profile not found: {server.credential_profile_id}",
+                "credential_profile": server.credential_profile_id,
+            }
+
+    host = _escape_ps_single_quote(server.host)
+    service = _escape_ps_single_quote(service_name)
+    script = _build_service_script(host, service, profile)
     stdout, stderr, exec_error = await asyncio.to_thread(_run_powershell_script, script, 8.0)
+    profile_name = profile.name if profile else "current_user"
     if exec_error == "TIMEOUT":
         return {
             "checked_at": _utc_now_iso(),
@@ -76,6 +125,7 @@ try {{
             "service_name": service_name,
             "status": "ERROR",
             "detail": "Service query timed out",
+            "credential_profile": profile_name,
         }
     if exec_error:
         return {
@@ -86,6 +136,7 @@ try {{
             "service_name": service_name,
             "status": "ERROR",
             "detail": f"PowerShell execution failed: {exec_error}",
+            "credential_profile": profile_name,
         }
 
     output = stdout.decode("utf-8", errors="ignore").strip()
@@ -99,6 +150,7 @@ try {{
             "service_name": service_name,
             "status": "ERROR",
             "detail": error_output or "No output",
+            "credential_profile": profile_name,
         }
 
     try:
@@ -112,6 +164,7 @@ try {{
             "service_name": service_name,
             "status": "ERROR",
             "detail": output,
+            "credential_profile": profile_name,
         }
 
     if payload.get("status") == "OK":
@@ -125,6 +178,7 @@ try {{
             "service_name": service_name,
             "status": mapped,
             "detail": raw_state or "UNKNOWN",
+            "credential_profile": profile_name,
         }
 
     error_message = payload.get("error") or error_output or "Unknown error"
@@ -137,14 +191,25 @@ try {{
         "service_name": service_name,
         "status": mapped,
         "detail": error_message,
+        "credential_profile": profile_name,
     }
 
 
-async def run_service_sweep(servers: list[ServerTarget]) -> dict[str, Any]:
+async def run_service_sweep(
+    servers: list[ServerTarget],
+    credential_profiles: list[CredentialProfile],
+) -> dict[str, Any]:
+    profile_lookup = {profile.id: profile for profile in credential_profiles}
     task_specs: list[tuple[ServerTarget, str, asyncio.Task[dict[str, Any]]]] = []
     for server in servers:
         for service_name in server.services:
-            task_specs.append((server, service_name, asyncio.create_task(_check_service(server, service_name))))
+            task_specs.append(
+                (
+                    server,
+                    service_name,
+                    asyncio.create_task(_check_service(server, service_name, profile_lookup)),
+                )
+            )
 
     tasks = [task for _, _, task in task_specs]
     gathered = await asyncio.gather(*tasks, return_exceptions=True) if tasks else []
@@ -160,6 +225,7 @@ async def run_service_sweep(servers: list[ServerTarget]) -> dict[str, Any]:
                     "service_name": service_name,
                     "status": "ERROR",
                     "detail": f"Unexpected service check error: {item}",
+                    "credential_profile": server.credential_profile_id or "current_user",
                 }
             )
         else:

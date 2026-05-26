@@ -418,6 +418,18 @@ DNS_QTYPE_BY_PROBE = {
     "dns_srv": 33,  # SRV
 }
 
+DNS_TYPE_NAME = {
+    1: "A",
+    2: "NS",
+    5: "CNAME",
+    6: "SOA",
+    12: "PTR",
+    15: "MX",
+    16: "TXT",
+    28: "AAAA",
+    33: "SRV",
+}
+
 DNS_QUERY_NAME_BY_PROBE = {
     "dns_a": "example.com",
     "dns_soa": "example.com",
@@ -444,9 +456,169 @@ def _build_dns_query_packet(probe_type: ProbeType) -> tuple[int, bytes, int, str
     return tx_id, header + question, qtype, query_name
 
 
+def _decode_dns_name(
+    packet: bytes,
+    offset: int,
+    *,
+    _visited: set[int] | None = None,
+    _depth: int = 0,
+) -> tuple[str, int]:
+    if _visited is None:
+        _visited = set()
+    if _depth > 20:
+        raise ValueError("DNS name compression recursion too deep.")
+
+    labels: list[str] = []
+    cursor = offset
+    jumped = False
+    next_offset = offset
+    while True:
+        if cursor >= len(packet):
+            raise ValueError("DNS name offset out of packet bounds.")
+        length = packet[cursor]
+        if (length & 0xC0) == 0xC0:
+            if cursor + 1 >= len(packet):
+                raise ValueError("Invalid DNS compression pointer.")
+            pointer = ((length & 0x3F) << 8) | packet[cursor + 1]
+            if pointer in _visited:
+                raise ValueError("DNS compression pointer loop detected.")
+            _visited.add(pointer)
+            pointed_name, _ = _decode_dns_name(
+                packet,
+                pointer,
+                _visited=_visited,
+                _depth=_depth + 1,
+            )
+            labels.append(pointed_name)
+            cursor += 2
+            if not jumped:
+                next_offset = cursor
+                jumped = True
+            break
+        if length == 0:
+            cursor += 1
+            if not jumped:
+                next_offset = cursor
+            break
+        cursor += 1
+        end = cursor + length
+        if end > len(packet):
+            raise ValueError("DNS label exceeds packet boundary.")
+        label = packet[cursor:end].decode("ascii", errors="ignore")
+        labels.append(label)
+        cursor = end
+
+    name = ".".join(part for part in labels if part)
+    return name, next_offset
+
+
+def _skip_dns_questions(packet: bytes, offset: int, question_count: int) -> int:
+    cursor = offset
+    for _ in range(question_count):
+        _, cursor = _decode_dns_name(packet, cursor)
+        if cursor + 4 > len(packet):
+            raise ValueError("DNS question section truncated.")
+        cursor += 4
+    return cursor
+
+
+def _dns_type_name(qtype: int) -> str:
+    return DNS_TYPE_NAME.get(qtype, f"TYPE{qtype}")
+
+
+def _parse_dns_rr(packet: bytes, offset: int) -> tuple[dict[str, Any], int]:
+    name, cursor = _decode_dns_name(packet, offset)
+    if cursor + 10 > len(packet):
+        raise ValueError("DNS resource record header truncated.")
+
+    rtype, rclass, ttl, rdlength = struct.unpack("!HHIH", packet[cursor : cursor + 10])
+    cursor += 10
+    rdata_start = cursor
+    rdata_end = rdata_start + rdlength
+    if rdata_end > len(packet):
+        raise ValueError("DNS resource record data truncated.")
+
+    parsed: dict[str, Any] = {
+        "name": name,
+        "type": rtype,
+        "type_name": _dns_type_name(rtype),
+        "class": rclass,
+        "ttl": ttl,
+    }
+
+    if rtype == 1 and rdlength == 4:  # A
+        parsed["address"] = socket.inet_ntoa(packet[rdata_start:rdata_end])
+    elif rtype == 33 and rdlength >= 6:  # SRV
+        priority, weight, service_port = struct.unpack("!HHH", packet[rdata_start : rdata_start + 6])
+        target, _ = _decode_dns_name(packet, rdata_start + 6)
+        parsed["priority"] = priority
+        parsed["weight"] = weight
+        parsed["port"] = service_port
+        parsed["target"] = target
+    elif rtype == 6:  # SOA
+        mname, soa_cursor = _decode_dns_name(packet, rdata_start)
+        rname, soa_cursor = _decode_dns_name(packet, soa_cursor)
+        if soa_cursor + 20 <= rdata_end:
+            serial, refresh, retry, expire, minimum = struct.unpack(
+                "!IIIII",
+                packet[soa_cursor : soa_cursor + 20],
+            )
+            parsed["mname"] = mname
+            parsed["rname"] = rname
+            parsed["serial"] = serial
+            parsed["refresh"] = refresh
+            parsed["retry"] = retry
+            parsed["expire"] = expire
+            parsed["minimum"] = minimum
+    else:
+        preview = packet[rdata_start:rdata_end][:16]
+        parsed["rdata_hex"] = preview.hex()
+
+    return parsed, rdata_end
+
+
+def _parse_dns_answers(packet: bytes, question_count: int, answer_count: int) -> list[dict[str, Any]]:
+    cursor = _skip_dns_questions(packet, 12, question_count)
+    answers: list[dict[str, Any]] = []
+    for _ in range(answer_count):
+        answer, cursor = _parse_dns_rr(packet, cursor)
+        answers.append(answer)
+    return answers
+
+
+def _dns_answer_summary(answers: list[dict[str, Any]], max_items: int = 3) -> str:
+    if not answers:
+        return "no answer records"
+
+    summary_items: list[str] = []
+    for answer in answers[:max_items]:
+        type_name = str(answer.get("type_name", "UNKNOWN"))
+        if type_name == "A":
+            summary_items.append(f"A {answer.get('address', '-')}")
+        elif type_name == "SRV":
+            summary_items.append(
+                "SRV "
+                f"{answer.get('priority', '-')}/{answer.get('weight', '-')}/{answer.get('port', '-')}"
+                f" -> {answer.get('target', '-')}"
+            )
+        elif type_name == "SOA":
+            summary_items.append(
+                "SOA "
+                f"{answer.get('mname', '-')} {answer.get('rname', '-')}"
+                f" serial={answer.get('serial', '-')}"
+            )
+        else:
+            summary_items.append(f"{type_name} {answer.get('name', '-')}")
+
+    if len(answers) > max_items:
+        summary_items.append(f"+{len(answers) - max_items} more")
+    return "; ".join(summary_items)
+
+
 def _dns_probe_sync(host: str, port: int, timeout_seconds: float, probe_type: ProbeType) -> dict[str, Any]:
     started = perf_counter()
     query_id, packet, qtype, query_name = _build_dns_query_packet(probe_type)
+    qtype_name = _dns_type_name(qtype)
     try:
         addr_infos = socket.getaddrinfo(host, port, type=socket.SOCK_DGRAM)
     except socket.gaierror as exc:
@@ -471,6 +643,7 @@ def _dns_probe_sync(host: str, port: int, timeout_seconds: float, probe_type: Pr
             }
         response_id = int.from_bytes(response[:2], "big")
         qr = (response[2] >> 7) & 0x01
+        qdcount = int.from_bytes(response[4:6], "big")
         rcode = response[3] & 0x0F
         ancount = int.from_bytes(response[6:8], "big")
         if response_id != query_id or qr != 1:
@@ -480,14 +653,29 @@ def _dns_probe_sync(host: str, port: int, timeout_seconds: float, probe_type: Pr
                 "probe_meta": {"query_type": qtype, "query_name": query_name},
                 "probe_latency_ms": round((perf_counter() - started) * 1000, 2),
             }
+
+        parse_error: str | None = None
+        answers: list[dict[str, Any]] = []
+        try:
+            answers = _parse_dns_answers(response, qdcount, ancount)
+        except Exception as exc:  # Keep probe as OK if DNS response is valid.
+            parse_error = str(exc)
+
+        summary = _dns_answer_summary(answers)
+        detail = f"DNS {qtype_name} response received (rcode={rcode}, answers={ancount})"
+        if summary:
+            detail = f"{detail}: {summary}"
         return {
             "probe_status": "PROBE_OK",
-            "probe_detail": f"DNS response received (qtype={qtype}, rcode={rcode}, answers={ancount}).",
+            "probe_detail": detail,
             "probe_meta": {
                 "query_type": qtype,
+                "query_type_name": qtype_name,
                 "query_name": query_name,
                 "rcode": rcode,
                 "answer_count": ancount,
+                "answers": answers[:10],
+                "parse_error": parse_error,
             },
             "probe_latency_ms": round((perf_counter() - started) * 1000, 2),
         }

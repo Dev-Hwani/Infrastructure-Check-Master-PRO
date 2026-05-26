@@ -26,11 +26,16 @@ http://localhost:8000
 - `http`, `https`, `rdp`
 - UDP 프로브
 - `dns_a`, `dns_srv`, `dns_soa`, `ntp`
+- DNS 응답 본문 파싱
+- `A/SRV/SOA` 레코드 핵심 필드 파싱/표시
 - NTP 응답 `version`, `stratum`, `mode` 파싱
 - 결과 일관성 지표
 - `STABLE / FLAKY` + 점수(%)
 - Windows 서비스 점검
 - 로컬/원격 리소스 점검
+- 사용자 템플릿 CRUD (조직별 표준 타깃 저장/적용)
+- 서버별 자격증명 프로파일 분리 점검
+- 대규모 결과 테이블 가상 스크롤 + 검색/필터
 - 설정 CRUD + 엑셀 다운로드
 
 ## 3) UI 사용 방법
@@ -55,12 +60,31 @@ http://localhost:8000
 
 지원 UX:
 
-- 행 직접 수정: `수정` 버튼으로 폼에 불러와서 `수정 저장`
+- 행 직접 수정: `수정` 버튼으로 폼에 불러와서 `저장`
 - 행 삭제: `삭제`
 - 템플릿 원클릭 입력
 - `AD 템플릿`
 - `WEB 템플릿`
 - `DB 템플릿`
+
+### 3.3 사용자 템플릿 CRUD
+
+- 현재 고급 타깃 목록을 사용자 템플릿으로 저장
+- 저장된 템플릿 `적용 / 수정 / 삭제`
+- 조직/사이트별 표준 점검 세트를 반복 재사용 가능
+
+### 3.4 대규모 결과 조회
+
+- 검색: 서버명, 호스트, reason_code, 상세 텍스트
+- 상태 필터, Transport 필터
+- 가상 스크롤로 수백~수천 건에서도 DOM 렌더 부하 완화
+
+### 3.5 자격증명 프로파일
+
+- 프로파일별 `도메인/사용자/비밀번호` 저장
+- 서버마다 `credential_profile_id`를 지정
+- 지정 시 원격 리소스/서비스 점검 PowerShell에 `-Credential` 적용
+- 미지정 시 현재 실행 계정 사용
 
 ## 4) 결과 해석
 
@@ -85,6 +109,7 @@ http://localhost:8000
 
 - `reason_code` (예: `WSAETIMEDOUT`, `WSAENETUNREACH`)
 - probe 결과 (`PROBE_OK` 등)
+- DNS probe의 경우 응답 레코드 핵심 요약(A/SRV/SOA)
 - 재시도 이력 (`1:TIMEOUT / 2:OPEN` 형태)
 - 일관성 지표 (`STABLE 100%`, `FLAKY 67%` 등)
 
@@ -95,6 +120,8 @@ http://localhost:8000
 - 앱 실행 호스트가 대상 서버로 네트워크 접근 가능해야 함
 - 원격 리소스/서비스 점검은 Windows PowerShell 원격 질의가 가능한 환경이어야 함
 - 방화벽/권한/도메인 정책에 따라 원격 지표가 `ERROR`로 나올 수 있음
+- 자격증명 프로파일 사용 시, 해당 계정에 원격 조회 권한이 있어야 함
+- 보안 권장: 운영 환경에서는 `config.json` 접근 권한을 최소화하고 계정 비밀번호를 주기적으로 교체
 
 ## 6) 설정 파일 예시 (`config.json`)
 
@@ -102,6 +129,26 @@ http://localhost:8000
 {
   "timeout_seconds": 2.0,
   "port_check_retries": 2,
+  "templates": [
+    {
+      "name": "HQ-AD-Baseline",
+      "description": "본사 AD 표준 점검",
+      "port_targets": [
+        { "port": 53, "transport": "udp", "probe": "dns_srv", "retries": 2 },
+        { "port": 53, "transport": "udp", "probe": "dns_soa", "retries": 2 },
+        { "port": 3389, "transport": "tcp", "probe": "rdp", "retries": 2 }
+      ]
+    }
+  ],
+  "credential_profiles": [
+    {
+      "name": "AD-Admin",
+      "username": "administrator",
+      "password": "******",
+      "domain": "CORP",
+      "description": "AD 운영 점검 계정"
+    }
+  ],
   "servers": [
     {
       "name": "WEB-01",
@@ -113,7 +160,8 @@ http://localhost:8000
         { "port": 53, "transport": "udp", "probe": "dns_soa", "retries": 2 }
       ],
       "services": ["W3SVC"],
-      "enable_remote_metrics": true
+      "enable_remote_metrics": true,
+      "credential_profile_id": null
     }
   ]
 }
@@ -127,11 +175,19 @@ http://localhost:8000
 - `POST /api/servers`: 서버 추가
 - `PUT /api/servers/{server_id}`: 서버 수정
 - `DELETE /api/servers/{server_id}`: 서버 삭제
+- `GET /api/templates`: 사용자 템플릿 목록
+- `POST /api/templates`: 사용자 템플릿 추가
+- `PUT /api/templates/{template_id}`: 사용자 템플릿 수정
+- `DELETE /api/templates/{template_id}`: 사용자 템플릿 삭제
+- `GET /api/credential-profiles`: 자격증명 프로파일 목록
+- `POST /api/credential-profiles`: 자격증명 프로파일 추가
+- `PUT /api/credential-profiles/{profile_id}`: 자격증명 프로파일 수정
+- `DELETE /api/credential-profiles/{profile_id}`: 자격증명 프로파일 삭제
 - `GET /api/report/download`: 최신 점검 엑셀 다운로드
 
 ## 8) 다음 개선 후보
 
-- UDP DNS 응답 본문 파싱 확장
-- SRV/SOA 레코드 값 표시 고도화
-- 템플릿 사용자 정의 저장
-- 대규모 타깃에서 페이지네이션/가상 스크롤
+- 자격증명 암호화 저장(예: OS Secret Store/KMS 연동)
+- 역할 기반 접근 제어(RBAC) 및 감사 로그
+- 가상 스크롤과 서버사이드 페이징 병행(초대형 데이터셋)
+- DNS 추가 타입(AAAA/MX/TXT) 파싱 확장

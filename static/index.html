@@ -16,7 +16,7 @@
       integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH"
       crossorigin="anonymous"
     />
-    <link rel="stylesheet" href="/static/styles.css?v=20260527-1" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260527-2" />
   </head>
   <body>
     <div class="bg-layer" aria-hidden="true"></div>
@@ -168,7 +168,34 @@
               <h2>포트 점검 결과</h2>
               <p class="panel-note mb-0" id="summaryText">점검 대기 중</p>
             </div>
-            <div class="table-responsive">
+            <div class="result-filter-wrap mb-2">
+              <input
+                id="resultSearchInput"
+                class="form-control form-control-sm"
+                placeholder="검색: 서버명 / 호스트 / reason_code"
+              />
+              <select id="resultStatusFilter" class="form-select form-select-sm">
+                <option value="ALL">모든 상태</option>
+                <option value="OPEN">OPEN</option>
+                <option value="REFUSED">REFUSED</option>
+                <option value="TIMEOUT">TIMEOUT</option>
+                <option value="FILTERED">FILTERED</option>
+                <option value="NO_ROUTE">NO_ROUTE</option>
+                <option value="HOST_UNREACHABLE">HOST_UNREACHABLE</option>
+                <option value="NETWORK_UNREACHABLE">NETWORK_UNREACHABLE</option>
+                <option value="UNKNOWN_HOST">UNKNOWN_HOST</option>
+                <option value="UDP_OPEN_OR_FILTERED">UDP_OPEN_OR_FILTERED</option>
+                <option value="UDP_CLOSED">UDP_CLOSED</option>
+                <option value="ERROR">ERROR</option>
+              </select>
+              <select id="resultTransportFilter" class="form-select form-select-sm">
+                <option value="ALL">모든 Transport</option>
+                <option value="tcp">TCP</option>
+                <option value="udp">UDP</option>
+              </select>
+              <div id="resultFilterMeta" class="panel-note mb-0">0 / 0</div>
+            </div>
+            <div id="resultTableContainer" class="table-responsive virtual-table-container">
               <table class="table table-hover align-middle mb-0">
                 <thead>
                   <tr>
@@ -198,17 +225,23 @@
             </div>
             <form id="serverForm" class="row g-3">
               <input id="editingServerId" type="hidden" />
-              <div class="col-12 col-md-4">
+              <div class="col-12 col-md-3">
                 <label for="serverName" class="form-label">서버명</label>
                 <input id="serverName" class="form-control" placeholder="예: APP-01" required />
               </div>
-              <div class="col-12 col-md-4">
+              <div class="col-12 col-md-3">
                 <label for="serverHost" class="form-label">IP 또는 Host</label>
                 <input id="serverHost" class="form-control" placeholder="예: 192.168.0.120" required />
               </div>
-              <div class="col-12 col-md-4">
+              <div class="col-12 col-md-3">
                 <label for="serverPorts" class="form-label">포트 목록 (콤마 구분)</label>
                 <input id="serverPorts" class="form-control" placeholder="80,443,3389 (기본 TCP)" />
+              </div>
+              <div class="col-12 col-md-3">
+                <label for="serverCredentialProfile" class="form-label">자격증명 프로파일</label>
+                <select id="serverCredentialProfile" class="form-select">
+                  <option value="">현재 실행 계정</option>
+                </select>
               </div>
               <div class="col-12">
                 <div class="advanced-target-box">
@@ -276,6 +309,40 @@
                       </tbody>
                     </table>
                   </div>
+                  <hr class="my-3" />
+                  <p class="advanced-title mb-2">조직 템플릿 저장/관리</p>
+                  <input id="editingTemplateId" type="hidden" />
+                  <div class="row g-2 align-items-end">
+                    <div class="col-12 col-md-3">
+                      <label for="templateName" class="form-label">템플릿명</label>
+                      <input id="templateName" class="form-control" placeholder="예: HQ-AD-Baseline" />
+                    </div>
+                    <div class="col-12 col-md-5">
+                      <label for="templateDescription" class="form-label">설명</label>
+                      <input id="templateDescription" class="form-control" placeholder="예: 본사 AD 점검 표준 템플릿" />
+                    </div>
+                    <div class="col-12 col-md-4 d-flex gap-2">
+                      <button id="saveTemplateBtn" type="button" class="btn btn-sm btn-outline-info">템플릿 저장</button>
+                      <button id="resetTemplateFormBtn" type="button" class="btn btn-sm btn-outline-secondary">초기화</button>
+                    </div>
+                  </div>
+                  <div class="table-responsive mt-2">
+                    <table class="table table-sm align-middle mb-0">
+                      <thead>
+                        <tr>
+                          <th>템플릿명</th>
+                          <th>설명</th>
+                          <th>타깃 수</th>
+                          <th>작업</th>
+                        </tr>
+                      </thead>
+                      <tbody id="templateListBody">
+                        <tr>
+                          <td colspan="4" class="text-muted py-2">저장된 사용자 템플릿이 없습니다.</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               </div>
               <div class="col-12">
@@ -324,6 +391,57 @@
               </table>
             </div>
           </article>
+
+          <article class="panel mt-3">
+            <div class="panel-title-wrap">
+              <h2>원격 점검 자격증명 프로파일</h2>
+              <p class="panel-note mb-0">서버별로 연결 계정을 분리해 원격 리소스/서비스 점검 성공률을 높입니다.</p>
+            </div>
+            <form id="credentialProfileForm" class="row g-2 mb-2">
+              <input id="editingCredentialProfileId" type="hidden" />
+              <div class="col-12 col-md-2">
+                <label for="credentialProfileName" class="form-label">프로파일명</label>
+                <input id="credentialProfileName" class="form-control" placeholder="예: AD-Admin" />
+              </div>
+              <div class="col-12 col-md-3">
+                <label for="credentialProfileUsername" class="form-label">사용자명</label>
+                <input id="credentialProfileUsername" class="form-control" placeholder="예: administrator" />
+              </div>
+              <div class="col-12 col-md-2">
+                <label for="credentialProfileDomain" class="form-label">도메인(선택)</label>
+                <input id="credentialProfileDomain" class="form-control" placeholder="예: CORP" />
+              </div>
+              <div class="col-12 col-md-3">
+                <label for="credentialProfilePassword" class="form-label">비밀번호</label>
+                <input id="credentialProfilePassword" type="password" class="form-control" />
+              </div>
+              <div class="col-12 col-md-2">
+                <label for="credentialProfileDescription" class="form-label">설명</label>
+                <input id="credentialProfileDescription" class="form-control" placeholder="예: AD 운영계정" />
+              </div>
+              <div class="col-12 d-flex gap-2">
+                <button type="submit" class="btn btn-sm btn-outline-info">프로파일 저장</button>
+                <button id="resetCredentialProfileFormBtn" type="button" class="btn btn-sm btn-outline-secondary">초기화</button>
+              </div>
+            </form>
+            <div class="table-responsive">
+              <table class="table table-sm align-middle mb-0">
+                <thead>
+                  <tr>
+                    <th>프로파일명</th>
+                    <th>계정</th>
+                    <th>설명</th>
+                    <th>작업</th>
+                  </tr>
+                </thead>
+                <tbody id="credentialProfileListBody">
+                  <tr>
+                    <td colspan="4" class="text-muted py-2">등록된 프로파일이 없습니다.</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </article>
         </section>
       </div>
     </main>
@@ -333,6 +451,6 @@
       integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz"
       crossorigin="anonymous"
     ></script>
-    <script src="/static/app.js?v=20260527-1"></script>
+    <script src="/static/app.js?v=20260527-2"></script>
   </body>
 </html>
