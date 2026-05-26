@@ -12,7 +12,18 @@ def utc_now() -> datetime:
 
 
 TransportProtocol = Literal["tcp", "udp"]
-ProbeType = Literal["none", "auto", "http", "https", "rdp", "dns", "ntp"]
+ProbeType = Literal[
+    "none",
+    "auto",
+    "http",
+    "https",
+    "rdp",
+    "dns",
+    "dns_a",
+    "dns_srv",
+    "dns_soa",
+    "ntp",
+]
 
 
 class PortTarget(BaseModel):

@@ -6,6 +6,7 @@ import os
 import struct
 import socket
 import ssl
+from collections import Counter
 from contextlib import suppress
 from datetime import datetime, timezone
 from time import perf_counter
@@ -31,11 +32,25 @@ AUTO_TCP_PROBE_PORTS: dict[int, ProbeType] = {
     3389: "rdp",
 }
 AUTO_UDP_PROBE_PORTS: dict[int, ProbeType] = {
-    53: "dns",
+    53: "dns_a",
     123: "ntp",
 }
 
 RETRYABLE_STATUSES: set[str] = {"TIMEOUT", "FILTERED", "ERROR", "PROBE_TIMEOUT"}
+
+REASON_CODE_ACTION_GUIDE = {
+    "WSAETIMEDOUT": "타임아웃: 대상/중간 방화벽 드롭 정책과 경로 지연을 확인하세요.",
+    "ETIMEDOUT": "타임아웃: 대상 서비스 지연 또는 네트워크 드롭 여부를 확인하세요.",
+    "WSAENETUNREACH": "네트워크 도달 불가: 라우팅 테이블, 게이트웨이, VLAN 구성을 확인하세요.",
+    "ENETUNREACH": "네트워크 도달 불가: 경로 및 서브넷 설정을 확인하세요.",
+    "WSAEHOSTUNREACH": "호스트 도달 불가: 대상 서버 전원 및 NIC 연결 상태를 확인하세요.",
+    "EHOSTUNREACH": "호스트 도달 불가: 대상 IP와 네트워크 경로를 확인하세요.",
+    "WSAECONNREFUSED": "포트 거절: 서비스 미기동 또는 리슨 포트 오설정 가능성이 큽니다.",
+    "ECONNREFUSED": "포트 거절: 대상 서비스가 해당 포트를 리슨 중인지 확인하세요.",
+    "WSAEACCES": "접근 차단: 로컬/원격 방화벽 또는 보안정책(EDR/ACL) 확인이 필요합니다.",
+    "EAI_NONAME": "호스트명 해석 실패: DNS 서버 설정 및 호스트명 오타를 확인하세요.",
+    "NO_UDP_RESPONSE": "UDP 무응답: UDP는 무응답이 정상일 수 있습니다. DNS/NTP 프로브 결과를 함께 확인하세요.",
+}
 
 
 def _utc_now_iso() -> str:
@@ -55,6 +70,8 @@ ERR_CONN_RESET = {10054, _safe_errno_value("ECONNRESET")}
 
 
 def _resolve_probe_type(probe: ProbeType, port: int, transport: str) -> ProbeType:
+    if probe == "dns":
+        return "dns_a"
     if probe != "auto":
         return probe
     if transport == "udp":
@@ -125,7 +142,9 @@ def _attempt_payload(
     }
 
 
-def _recommended_action(status: PortStatus, transport: str, probe_status: str) -> str:
+def _recommended_action(status: PortStatus, transport: str, probe_status: str, reason_code: str) -> str:
+    if reason_code in REASON_CODE_ACTION_GUIDE:
+        return REASON_CODE_ACTION_GUIDE[reason_code]
     if status == "OPEN" and probe_status == "PROBE_OK":
         return "접속 및 애플리케이션 응답이 정상입니다."
     if status == "OPEN" and probe_status in {"PROBE_FAILED", "INVALID_RESPONSE", "PROBE_TIMEOUT"}:
@@ -393,19 +412,41 @@ async def _rdp_probe(host: str, port: int, timeout_seconds: float) -> dict[str, 
                 await writer.wait_closed()
 
 
-def _build_dns_query_packet(query_name: str = "example.com") -> tuple[int, bytes]:
+DNS_QTYPE_BY_PROBE = {
+    "dns_a": 1,  # A
+    "dns_soa": 6,  # SOA
+    "dns_srv": 33,  # SRV
+}
+
+DNS_QUERY_NAME_BY_PROBE = {
+    "dns_a": "example.com",
+    "dns_soa": "example.com",
+    "dns_srv": "_ldap._tcp.example.com",
+}
+
+
+def _encode_dns_name(name: str) -> bytes:
+    labels = [label for label in name.strip(".").split(".") if label]
+    encoded = b""
+    for label in labels:
+        raw = label.encode("ascii", errors="ignore")
+        encoded += len(raw).to_bytes(1, "big") + raw
+    return encoded + b"\x00"
+
+
+def _build_dns_query_packet(probe_type: ProbeType) -> tuple[int, bytes, int, str]:
+    normalized_probe = probe_type if probe_type in DNS_QTYPE_BY_PROBE else "dns_a"
     tx_id = int.from_bytes(os.urandom(2), "big")
-    labels = query_name.strip(".").split(".")
-    qname = b"".join(len(label).to_bytes(1, "big") + label.encode("ascii", errors="ignore") for label in labels)
-    qname += b"\x00"
+    query_name = DNS_QUERY_NAME_BY_PROBE[normalized_probe]
+    qtype = DNS_QTYPE_BY_PROBE[normalized_probe]
     header = struct.pack("!HHHHHH", tx_id, 0x0100, 1, 0, 0, 0)
-    question = qname + struct.pack("!HH", 1, 1)  # Type A, Class IN
-    return tx_id, header + question
+    question = _encode_dns_name(query_name) + struct.pack("!HH", qtype, 1)  # QCLASS=IN
+    return tx_id, header + question, qtype, query_name
 
 
-def _dns_probe_sync(host: str, port: int, timeout_seconds: float) -> dict[str, Any]:
+def _dns_probe_sync(host: str, port: int, timeout_seconds: float, probe_type: ProbeType) -> dict[str, Any]:
     started = perf_counter()
-    query_id, packet = _build_dns_query_packet()
+    query_id, packet, qtype, query_name = _build_dns_query_packet(probe_type)
     try:
         addr_infos = socket.getaddrinfo(host, port, type=socket.SOCK_DGRAM)
     except socket.gaierror as exc:
@@ -425,32 +466,43 @@ def _dns_probe_sync(host: str, port: int, timeout_seconds: float) -> dict[str, A
             return {
                 "probe_status": "INVALID_RESPONSE",
                 "probe_detail": "DNS response too short.",
+                "probe_meta": {"query_type": qtype, "query_name": query_name},
                 "probe_latency_ms": round((perf_counter() - started) * 1000, 2),
             }
         response_id = int.from_bytes(response[:2], "big")
         qr = (response[2] >> 7) & 0x01
         rcode = response[3] & 0x0F
+        ancount = int.from_bytes(response[6:8], "big")
         if response_id != query_id or qr != 1:
             return {
                 "probe_status": "INVALID_RESPONSE",
                 "probe_detail": "DNS response header is invalid.",
+                "probe_meta": {"query_type": qtype, "query_name": query_name},
                 "probe_latency_ms": round((perf_counter() - started) * 1000, 2),
             }
         return {
             "probe_status": "PROBE_OK",
-            "probe_detail": f"DNS response received (rcode={rcode}).",
+            "probe_detail": f"DNS response received (qtype={qtype}, rcode={rcode}, answers={ancount}).",
+            "probe_meta": {
+                "query_type": qtype,
+                "query_name": query_name,
+                "rcode": rcode,
+                "answer_count": ancount,
+            },
             "probe_latency_ms": round((perf_counter() - started) * 1000, 2),
         }
     except socket.timeout:
         return {
             "probe_status": "PROBE_TIMEOUT",
             "probe_detail": f"DNS probe timeout after {timeout_seconds:.1f}s.",
+            "probe_meta": {"query_type": qtype, "query_name": query_name},
             "probe_latency_ms": round((perf_counter() - started) * 1000, 2),
         }
     except OSError as exc:
         return {
             "probe_status": "PROBE_FAILED",
             "probe_detail": f"DNS probe failed: {exc}",
+            "probe_meta": {"query_type": qtype, "query_name": query_name},
             "probe_latency_ms": round((perf_counter() - started) * 1000, 2),
         }
     finally:
@@ -481,16 +533,21 @@ def _ntp_probe_sync(host: str, port: int, timeout_seconds: float) -> dict[str, A
                 "probe_detail": "NTP response too short.",
                 "probe_latency_ms": round((perf_counter() - started) * 1000, 2),
             }
-        mode = response[0] & 0x07
+        first_byte = response[0]
+        mode = first_byte & 0x07
+        version = (first_byte >> 3) & 0x07
+        stratum = response[1]
         if mode not in {4, 5}:  # server / broadcast server
             return {
                 "probe_status": "INVALID_RESPONSE",
-                "probe_detail": f"Unexpected NTP mode: {mode}",
+                "probe_detail": f"Unexpected NTP mode: {mode} (version={version}, stratum={stratum})",
+                "probe_meta": {"mode": mode, "version": version, "stratum": stratum},
                 "probe_latency_ms": round((perf_counter() - started) * 1000, 2),
             }
         return {
             "probe_status": "PROBE_OK",
-            "probe_detail": "NTP response received.",
+            "probe_detail": f"NTP response received (version={version}, stratum={stratum}, mode={mode}).",
+            "probe_meta": {"mode": mode, "version": version, "stratum": stratum},
             "probe_latency_ms": round((perf_counter() - started) * 1000, 2),
         }
     except socket.timeout:
@@ -516,8 +573,8 @@ async def _run_application_probe(host: str, port: int, probe_type: ProbeType, ti
         return await _http_probe(host, port, timeout_seconds, use_tls=True)
     if probe_type == "rdp":
         return await _rdp_probe(host, port, timeout_seconds)
-    if probe_type == "dns":
-        return await asyncio.to_thread(_dns_probe_sync, host, port, timeout_seconds)
+    if probe_type in {"dns", "dns_a", "dns_srv", "dns_soa"}:
+        return await asyncio.to_thread(_dns_probe_sync, host, port, timeout_seconds, probe_type)
     if probe_type == "ntp":
         return await asyncio.to_thread(_ntp_probe_sync, host, port, timeout_seconds)
     return {
@@ -556,6 +613,17 @@ def _choose_final_status(attempts: list[dict[str, Any]], transport: str) -> Port
 
 def _should_retry(status: PortStatus) -> bool:
     return status in RETRYABLE_STATUSES
+
+
+def _consistency_indicator(attempts: list[dict[str, Any]]) -> tuple[str, float]:
+    if not attempts:
+        return ("UNKNOWN", 0.0)
+    statuses = [str(item["status"]) for item in attempts]
+    counter = Counter(statuses)
+    most_common_count = counter.most_common(1)[0][1]
+    score = round((most_common_count / len(statuses)) * 100, 2)
+    label = "STABLE" if len(counter) == 1 else "FLAKY"
+    return (label, score)
 
 
 def _expand_server_port_targets(server: ServerTarget) -> list[PortTarget]:
@@ -616,6 +684,7 @@ async def check_single_port_target(
     detail = final_attempt["detail"]
     if final_status == "FILTERED":
         detail = f"{detail} Final decision: likely filtered/dropped after {len(attempts)} attempts."
+    consistency, consistency_score = _consistency_indicator(attempts)
 
     total_elapsed = round((perf_counter() - check_started) * 1000, 2)
     return {
@@ -631,7 +700,14 @@ async def check_single_port_target(
         "status": final_status,
         "reason_code": final_attempt["reason_code"],
         "detail": detail,
-        "recommended_action": _recommended_action(final_status, target.transport, str(probe_result["probe_status"])),
+        "recommended_action": _recommended_action(
+            final_status,
+            target.transport,
+            str(probe_result["probe_status"]),
+            str(final_attempt["reason_code"]),
+        ),
+        "consistency": consistency,
+        "consistency_score": consistency_score,
         "latency_ms": round(final_attempt["latency_ms"], 2),
         "total_latency_ms": total_elapsed,
         "attempts": attempts,
@@ -666,13 +742,16 @@ async def run_port_sweep(
     status_counts: dict[str, int] = {}
     transport_counts: dict[str, int] = {}
     probe_counts: dict[str, int] = {}
+    consistency_counts: dict[str, int] = {}
     for result in results:
         status = str(result["status"])
         transport = str(result["transport"])
         probe_status = str(result["probe_result"]["probe_status"])
+        consistency = str(result.get("consistency", "UNKNOWN"))
         status_counts[status] = status_counts.get(status, 0) + 1
         transport_counts[transport] = transport_counts.get(transport, 0) + 1
         probe_counts[probe_status] = probe_counts.get(probe_status, 0) + 1
+        consistency_counts[consistency] = consistency_counts.get(consistency, 0) + 1
 
     total_ms = round((perf_counter() - started) * 1000, 2)
     return {
@@ -683,5 +762,6 @@ async def run_port_sweep(
             "status_counts": status_counts,
             "transport_counts": transport_counts,
             "probe_status_counts": probe_counts,
+            "consistency_counts": consistency_counts,
         },
     }

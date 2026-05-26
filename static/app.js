@@ -1,6 +1,51 @@
+const PROBE_OPTIONS = Object.freeze([
+  "auto",
+  "none",
+  "http",
+  "https",
+  "rdp",
+  "dns_a",
+  "dns_srv",
+  "dns_soa",
+  "ntp",
+]);
+
+const TCP_PROBE_OPTIONS = new Set(["auto", "none", "http", "https", "rdp"]);
+const UDP_PROBE_OPTIONS = new Set(["auto", "none", "dns_a", "dns_srv", "dns_soa", "ntp"]);
+
+const ROLE_TEMPLATES = Object.freeze({
+  AD: [
+    { port: 53, transport: "tcp", probe: "none", retries: 2 },
+    { port: 53, transport: "udp", probe: "dns_a", retries: 2 },
+    { port: 53, transport: "udp", probe: "dns_srv", retries: 2 },
+    { port: 53, transport: "udp", probe: "dns_soa", retries: 2 },
+    { port: 88, transport: "tcp", probe: "none", retries: 2 },
+    { port: 88, transport: "udp", probe: "none", retries: 2 },
+    { port: 389, transport: "tcp", probe: "none", retries: 2 },
+    { port: 445, transport: "tcp", probe: "none", retries: 2 },
+    { port: 3389, transport: "tcp", probe: "rdp", retries: 2 },
+  ],
+  WEB: [
+    { port: 80, transport: "tcp", probe: "http", retries: 2 },
+    { port: 443, transport: "tcp", probe: "https", retries: 2 },
+    { port: 8080, transport: "tcp", probe: "http", retries: 2 },
+    { port: 8443, transport: "tcp", probe: "https", retries: 2 },
+    { port: 3389, transport: "tcp", probe: "rdp", retries: 2 },
+  ],
+  DB: [
+    { port: 1433, transport: "tcp", probe: "none", retries: 2 },
+    { port: 3306, transport: "tcp", probe: "none", retries: 2 },
+    { port: 5432, transport: "tcp", probe: "none", retries: 2 },
+    { port: 1521, transport: "tcp", probe: "none", retries: 2 },
+    { port: 27017, transport: "tcp", probe: "none", retries: 2 },
+    { port: 3389, transport: "tcp", probe: "rdp", retries: 2 },
+  ],
+});
+
 const state = {
   servers: [],
   draftPortTargets: [],
+  editingDraftTargetIndex: null,
 };
 
 const statusRowClassMap = {
@@ -35,6 +80,20 @@ const actionGuideMap = {
   PROBE_FAILED: "프로브 핸드셰이크 실패, 앱 로그 확인",
   INVALID_RESPONSE: "앱 프로토콜 응답 형식 확인",
   ERROR: "reason_code와 서버 로그 추가 확인",
+};
+
+const reasonCodeGuideMap = {
+  WSAETIMEDOUT: "응답 지연이 큽니다. 중간 방화벽 드롭/지연과 대상 서비스 부하를 확인하세요.",
+  ETIMEDOUT: "응답 시간 초과입니다. 네트워크 품질과 서비스 응답 시간을 확인하세요.",
+  WSAENETUNREACH: "네트워크 경로가 없습니다. 라우팅, VLAN, 게이트웨이 설정을 확인하세요.",
+  ENETUNREACH: "네트워크 도달 불가입니다. 서브넷/라우팅 설정을 확인하세요.",
+  WSAEHOSTUNREACH: "호스트 도달 불가입니다. 대상 전원/NIC/보안 정책을 확인하세요.",
+  EHOSTUNREACH: "호스트 도달 불가입니다. 대상 IP 및 경로를 확인하세요.",
+  WSAECONNREFUSED: "포트에서 연결을 거절했습니다. 서비스 실행 및 리슨 포트를 확인하세요.",
+  ECONNREFUSED: "포트에서 연결을 거절했습니다. 서비스가 해당 포트를 열었는지 확인하세요.",
+  WSAEACCES: "접근 차단입니다. 로컬/원격 방화벽과 EDR 정책을 확인하세요.",
+  EAI_NONAME: "호스트명 해석 실패입니다. DNS 또는 호스트명 오타를 확인하세요.",
+  NO_UDP_RESPONSE: "UDP 무응답은 정상일 수 있습니다. DNS/NTP 프로브 결과를 함께 확인하세요.",
 };
 
 function notify({ type = "info", title = "안내", message = "", timeout = 3600 }) {
@@ -98,54 +157,102 @@ function formatDateTime(isoString) {
   return date.toLocaleString("ko-KR", { hour12: false });
 }
 
+function draftTargetKey(target) {
+  return `${target.port}/${target.transport}/${target.probe}`;
+}
+
+function normalizeProbe(rawProbe) {
+  const probe = String(rawProbe || "auto").toLowerCase();
+  if (probe === "dns") return "dns_a";
+  return probe;
+}
+
+function isProbeAllowedByTransport(probe, transport) {
+  if (transport === "tcp") return TCP_PROBE_OPTIONS.has(probe);
+  if (transport === "udp") return UDP_PROBE_OPTIONS.has(probe);
+  return false;
+}
+
 function normalizePortTarget(input) {
   const port = Number.parseInt(input.port, 10);
   if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
   const transport = String(input.transport || "tcp").toLowerCase();
-  const probe = String(input.probe || "auto").toLowerCase();
-  const retries = Number.parseInt(input.retries, 10);
+  const probe = normalizeProbe(input.probe);
+  let retries = Number.parseInt(input.retries, 10);
+  if (!Number.isInteger(retries)) retries = 2;
+
   if (!["tcp", "udp"].includes(transport)) return null;
-  if (!["auto", "none", "http", "https", "rdp", "dns", "ntp"].includes(probe)) return null;
+  if (!PROBE_OPTIONS.includes(probe)) return null;
   if (!Number.isInteger(retries) || retries < 0 || retries > 5) return null;
+  if (!isProbeAllowedByTransport(probe, transport)) return null;
   return { port, transport, probe, retries };
 }
 
+function sortDraftPortTargets() {
+  state.draftPortTargets.sort((a, b) => {
+    if (a.port !== b.port) return a.port - b.port;
+    if (a.transport !== b.transport) return a.transport.localeCompare(b.transport);
+    return a.probe.localeCompare(b.probe);
+  });
+}
+
+function dedupeDraftPortTargets() {
+  const deduped = new Map();
+  state.draftPortTargets.forEach((target) => deduped.set(draftTargetKey(target), target));
+  state.draftPortTargets = Array.from(deduped.values());
+  sortDraftPortTargets();
+}
+
 function addOrReplaceDraftPortTarget(target) {
-  const key = `${target.port}/${target.transport}/${target.probe}`;
-  const idx = state.draftPortTargets.findIndex(
-    (item) => `${item.port}/${item.transport}/${item.probe}` === key
-  );
+  const key = draftTargetKey(target);
+  const idx = state.draftPortTargets.findIndex((item) => draftTargetKey(item) === key);
   if (idx >= 0) {
     state.draftPortTargets[idx] = target;
   } else {
     state.draftPortTargets.push(target);
   }
-  state.draftPortTargets.sort((a, b) => a.port - b.port);
+  sortDraftPortTargets();
+}
+
+function setDraftTargetEditMode(index) {
+  const button = document.getElementById("addPortTargetBtn");
+  const isEditing =
+    Number.isInteger(index) && index >= 0 && index < state.draftPortTargets.length;
+  state.editingDraftTargetIndex = isEditing ? index : null;
+  button.textContent = isEditing ? "저장" : "추가";
 }
 
 function renderDraftPortTargets() {
   const tbody = document.getElementById("portTargetBody");
   if (!state.draftPortTargets.length) {
-    tbody.innerHTML = '<tr><td colspan="5" class="text-muted py-2">고급 타깃이 없습니다.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="6" class="text-muted py-2">고급 타깃이 없습니다.</td></tr>';
     return;
   }
 
   tbody.innerHTML = state.draftPortTargets
-    .map(
-      (target, index) => `
-      <tr>
-        <td>${target.port}</td>
-        <td>${target.transport.toUpperCase()}</td>
-        <td>${target.probe}</td>
-        <td>${target.retries}</td>
-        <td>
-          <button class="btn btn-sm btn-outline-danger" data-action="remove-target" data-index="${index}">
-            삭제
-          </button>
-        </td>
-      </tr>
-    `
-    )
+    .map((target, index) => {
+      const isEditing = state.editingDraftTargetIndex === index;
+      const editBtnClass = isEditing ? "btn-warning" : "btn-outline-info";
+      const editBtnText = isEditing ? "편집중" : "수정";
+      return `
+        <tr>
+          <td>${target.port}</td>
+          <td>${target.transport.toUpperCase()}</td>
+          <td>${target.probe}</td>
+          <td>${target.retries}</td>
+          <td>
+            <button class="btn btn-sm ${editBtnClass}" data-action="edit-target" data-index="${index}">
+              ${editBtnText}
+            </button>
+          </td>
+          <td>
+            <button class="btn btn-sm btn-outline-danger" data-action="remove-target" data-index="${index}">
+              삭제
+            </button>
+          </td>
+        </tr>
+      `;
+    })
     .join("");
 }
 
@@ -154,9 +261,17 @@ function resetAdvancedPortTargetInputs() {
   document.getElementById("advancedTransport").value = "tcp";
   document.getElementById("advancedProbe").value = "auto";
   document.getElementById("advancedRetries").value = "2";
+  setDraftTargetEditMode(null);
 }
 
-function addDraftPortTargetFromForm() {
+function fillAdvancedPortTargetInputs(target) {
+  document.getElementById("advancedPort").value = String(target.port);
+  document.getElementById("advancedTransport").value = target.transport;
+  document.getElementById("advancedProbe").value = target.probe;
+  document.getElementById("advancedRetries").value = String(target.retries);
+}
+
+function upsertDraftPortTargetFromForm() {
   const raw = {
     port: document.getElementById("advancedPort").value,
     transport: document.getElementById("advancedTransport").value,
@@ -168,8 +283,23 @@ function addDraftPortTargetFromForm() {
     notify({
       type: "warning",
       title: "고급 타깃 입력값 오류",
-      message: "Port(1~65535), Transport, Probe, Retries(0~5)를 확인해 주세요.",
+      message:
+        "Port(1~65535), Transport/Probe 조합, Retries(0~5)를 확인해 주세요. TCP와 UDP는 지원 probe가 다릅니다.",
       timeout: 4800,
+    });
+    return;
+  }
+
+  const editingIndex = state.editingDraftTargetIndex;
+  if (Number.isInteger(editingIndex)) {
+    state.draftPortTargets[editingIndex] = target;
+    dedupeDraftPortTargets();
+    renderDraftPortTargets();
+    resetAdvancedPortTargetInputs();
+    notify({
+      type: "success",
+      title: "고급 타깃 수정 완료",
+      message: `${target.port}/${target.transport}/${target.probe} 항목을 수정했습니다.`,
     });
     return;
   }
@@ -187,6 +317,16 @@ function addDraftPortTargetFromForm() {
 function removeDraftPortTarget(index) {
   if (!Number.isInteger(index) || index < 0 || index >= state.draftPortTargets.length) return;
   const [removed] = state.draftPortTargets.splice(index, 1);
+
+  if (state.editingDraftTargetIndex === index) {
+    resetAdvancedPortTargetInputs();
+  } else if (
+    Number.isInteger(state.editingDraftTargetIndex) &&
+    state.editingDraftTargetIndex > index
+  ) {
+    state.editingDraftTargetIndex -= 1;
+  }
+
   renderDraftPortTargets();
   notify({
     type: "info",
@@ -195,9 +335,82 @@ function removeDraftPortTarget(index) {
   });
 }
 
+function applyRoleTemplate(roleKey) {
+  const template = ROLE_TEMPLATES[roleKey];
+  if (!Array.isArray(template) || !template.length) return;
+
+  let added = 0;
+  let updated = 0;
+  let skipped = 0;
+  for (const raw of template) {
+    const target = normalizePortTarget(raw);
+    if (!target) {
+      skipped += 1;
+      continue;
+    }
+    const key = draftTargetKey(target);
+    const idx = state.draftPortTargets.findIndex((item) => draftTargetKey(item) === key);
+    if (idx >= 0) {
+      state.draftPortTargets[idx] = target;
+      updated += 1;
+    } else {
+      state.draftPortTargets.push(target);
+      added += 1;
+    }
+  }
+
+  sortDraftPortTargets();
+  setDraftTargetEditMode(null);
+  renderDraftPortTargets();
+  notify({
+    type: "success",
+    title: `${roleKey} 템플릿 적용`,
+    message: `추가 ${added}건, 갱신 ${updated}건, 제외 ${skipped}건`,
+  });
+}
+
 function getRecommendedAction(row) {
   if (row.recommended_action) return row.recommended_action;
+  if (row.reason_code && reasonCodeGuideMap[row.reason_code]) return reasonCodeGuideMap[row.reason_code];
   return actionGuideMap[row.status] || "상세 로그를 확인해 추가 점검해 주세요.";
+}
+
+function formatProbeInfo(item) {
+  const probe = item.probe_result || {};
+  const probeStatus = probe.probe_status || "SKIPPED";
+  const probeDetail = probe.probe_detail || "-";
+  const probeMeta = probe.probe_meta || {};
+  const metaParts = [];
+
+  if (Number.isInteger(probeMeta.query_type)) metaParts.push(`qtype=${probeMeta.query_type}`);
+  if (Number.isInteger(probeMeta.rcode)) metaParts.push(`rcode=${probeMeta.rcode}`);
+  if (Number.isInteger(probeMeta.answer_count)) metaParts.push(`answer=${probeMeta.answer_count}`);
+  if (Number.isInteger(probeMeta.version)) metaParts.push(`version=${probeMeta.version}`);
+  if (Number.isInteger(probeMeta.stratum)) metaParts.push(`stratum=${probeMeta.stratum}`);
+  if (Number.isInteger(probeMeta.mode)) metaParts.push(`mode=${probeMeta.mode}`);
+
+  if (metaParts.length > 0) {
+    return `Probe ${probeStatus}: ${probeDetail} (${metaParts.join(", ")})`;
+  }
+  return `Probe ${probeStatus}: ${probeDetail}`;
+}
+
+function formatAttemptSummary(item) {
+  if (!Array.isArray(item.attempts) || item.attempts.length === 0) return "-";
+  return item.attempts.map((attempt) => `${attempt.attempt}:${attempt.status}`).join(" / ");
+}
+
+function formatConsistency(item) {
+  const label = item.consistency || "UNKNOWN";
+  const scoreRaw = Number(item.consistency_score);
+  const score = Number.isFinite(scoreRaw) ? scoreRaw.toFixed(0) : "0";
+  return `${label} ${score}%`;
+}
+
+function consistencyBadgeClass(consistency) {
+  if (consistency === "STABLE") return "text-bg-success";
+  if (consistency === "FLAKY") return "text-bg-warning";
+  return "text-bg-secondary";
 }
 
 function updateMetricCards(payload) {
@@ -267,18 +480,21 @@ function renderCheckResults(results) {
     .map((item) => {
       const rowClass = statusRowClassMap[item.status] || "status-error";
       const transport = String(item.transport || "tcp").toUpperCase();
-      const probe = item.probe_result || {};
-      const probeText =
-        probe.probe_status && probe.probe_status !== "SKIPPED"
-          ? `Probe ${probe.probe_status}: ${probe.probe_detail || "-"}`
-          : "Probe SKIPPED";
-      const detail = `${item.detail || "-"} | Reason: ${item.reason_code || "UNKNOWN"} | ${probeText}`;
+      const probeText = formatProbeInfo(item);
+      const consistencyText = formatConsistency(item);
+      const attemptsText = formatAttemptSummary(item);
+      const consistencyClass = consistencyBadgeClass(item.consistency);
+      const detail = `${item.detail || "-"} | Reason: ${item.reason_code || "UNKNOWN"} | ${probeText} | Attempts: ${attemptsText}`;
+
       return `
         <tr class="${rowClass}">
           <td>${item.server_name}</td>
           <td>${item.host}</td>
           <td>${item.port} <span class="text-muted">(${transport})</span></td>
-          <td><span class="badge status-badge">${item.status}</span></td>
+          <td>
+            <span class="badge status-badge">${item.status}</span>
+            <div class="mt-1"><span class="badge ${consistencyClass}">${consistencyText}</span></div>
+          </td>
           <td>${item.latency_ms}</td>
           <td>${detail}</td>
           <td>${getRecommendedAction(item)}</td>
@@ -320,11 +536,14 @@ function updateSummary(payload) {
   const counts = summary.status_counts || {};
   const probeCounts = summary.probe_status_counts || {};
   const transportCounts = summary.transport_counts || {};
+  const consistencyCounts = summary.consistency_counts || {};
   const svc = payload.service_checks?.summary?.status_counts || {};
   const duration = Number(summary.duration_ms || 0).toFixed(2);
+
   document.getElementById("summaryText").textContent =
     `완료 ${summary.total_checks ?? 0}건 | TCP ${transportCounts.tcp ?? 0} | UDP ${transportCounts.udp ?? 0} | ` +
     `FILTERED ${counts.FILTERED ?? 0} | NO_ROUTE ${counts.NO_ROUTE ?? 0} | PROBE_OK ${probeCounts.PROBE_OK ?? 0} | ` +
+    `STABLE ${consistencyCounts.STABLE ?? 0} | FLAKY ${consistencyCounts.FLAKY ?? 0} | ` +
     `서비스 STOPPED ${svc.STOPPED ?? 0} | ${duration}ms`;
 }
 
@@ -340,6 +559,15 @@ function resetServerForm() {
   resetAdvancedPortTargetInputs();
 }
 
+function normalizeServerPortTarget(item) {
+  return normalizePortTarget({
+    port: item.port,
+    transport: item.transport || "tcp",
+    probe: item.probe || "auto",
+    retries: Number.isInteger(item.retries) ? item.retries : 2,
+  });
+}
+
 function fillServerForm(server) {
   document.getElementById("editingServerId").value = server.id;
   document.getElementById("serverName").value = server.name;
@@ -347,20 +575,19 @@ function fillServerForm(server) {
   document.getElementById("serverPorts").value = (server.ports || []).join(",");
   document.getElementById("serverServices").value = (server.services || []).join(",");
   document.getElementById("remoteMetricsEnabled").checked = !!server.enable_remote_metrics;
-  state.draftPortTargets = (server.port_targets || []).map((item) => ({
-    port: item.port,
-    transport: item.transport || "tcp",
-    probe: item.probe || "auto",
-    retries: Number.isInteger(item.retries) ? item.retries : 2,
-  }));
+  state.draftPortTargets = (server.port_targets || [])
+    .map(normalizeServerPortTarget)
+    .filter((target) => target !== null);
+  sortDraftPortTargets();
   renderDraftPortTargets();
+  resetAdvancedPortTargetInputs();
 }
 
 function summarizeAdvancedTargets(portTargets) {
   if (!Array.isArray(portTargets) || !portTargets.length) return "-";
   const text = portTargets
     .slice(0, 2)
-    .map((t) => `${t.port}/${String(t.transport).toUpperCase()}/${t.probe}`)
+    .map((target) => `${target.port}/${String(target.transport).toUpperCase()}/${target.probe}`)
     .join(", ");
   return portTargets.length > 2 ? `${text} +${portTargets.length - 2}` : text;
 }
@@ -619,19 +846,38 @@ function onDraftTargetTableClick(event) {
   const target = event.target;
   if (!(target instanceof HTMLElement)) return;
   const action = target.dataset.action;
-  if (action !== "remove-target") return;
   const index = Number.parseInt(target.dataset.index || "", 10);
-  removeDraftPortTarget(index);
+  if (!Number.isInteger(index)) return;
+
+  if (action === "remove-target") {
+    removeDraftPortTarget(index);
+    return;
+  }
+
+  if (action === "edit-target") {
+    const draftTarget = state.draftPortTargets[index];
+    if (!draftTarget) return;
+    fillAdvancedPortTargetInputs(draftTarget);
+    setDraftTargetEditMode(index);
+    renderDraftPortTargets();
+    notify({
+      type: "info",
+      title: "타깃 편집",
+      message: `${draftTarget.port}/${draftTarget.transport}/${draftTarget.probe} 항목을 편집 중입니다.`,
+    });
+  }
 }
 
 function onAdvancedTransportChange() {
   const transport = document.getElementById("advancedTransport").value;
   const probeSelect = document.getElementById("advancedProbe");
-  if (transport === "udp" && ["http", "https", "rdp"].includes(probeSelect.value)) {
+  const selectedProbe = normalizeProbe(probeSelect.value);
+  const allowed = transport === "udp" ? UDP_PROBE_OPTIONS : TCP_PROBE_OPTIONS;
+
+  if (!allowed.has(selectedProbe)) {
     probeSelect.value = "auto";
-  }
-  if (transport === "tcp" && ["dns", "ntp"].includes(probeSelect.value)) {
-    probeSelect.value = "auto";
+  } else if (selectedProbe !== probeSelect.value) {
+    probeSelect.value = selectedProbe;
   }
 }
 
@@ -640,9 +886,12 @@ async function bootstrap() {
   document.getElementById("downloadBtn").addEventListener("click", handleDownloadReport);
   document.getElementById("serverForm").addEventListener("submit", submitServerForm);
   document.getElementById("serverListBody").addEventListener("click", onServerListClick);
-  document.getElementById("addPortTargetBtn").addEventListener("click", addDraftPortTargetFromForm);
+  document.getElementById("addPortTargetBtn").addEventListener("click", upsertDraftPortTargetFromForm);
   document.getElementById("portTargetBody").addEventListener("click", onDraftTargetTableClick);
   document.getElementById("advancedTransport").addEventListener("change", onAdvancedTransportChange);
+  document.getElementById("tplAdBtn").addEventListener("click", () => applyRoleTemplate("AD"));
+  document.getElementById("tplWebBtn").addEventListener("click", () => applyRoleTemplate("WEB"));
+  document.getElementById("tplDbBtn").addEventListener("click", () => applyRoleTemplate("DB"));
   document.getElementById("resetFormBtn").addEventListener("click", () => {
     resetServerForm();
     notify({
@@ -666,4 +915,3 @@ async function bootstrap() {
 }
 
 bootstrap();
-

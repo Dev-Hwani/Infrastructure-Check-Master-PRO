@@ -16,7 +16,7 @@
       integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH"
       crossorigin="anonymous"
     />
-    <link rel="stylesheet" href="/static/styles.css?v=20260526-2" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260527-1" />
   </head>
   <body>
     <div class="bg-layer" aria-hidden="true"></div>
@@ -212,7 +212,14 @@
               </div>
               <div class="col-12">
                 <div class="advanced-target-box">
-                  <p class="advanced-title mb-2">고급 포트 타깃 (Transport / Probe / Retries)</p>
+                  <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
+                    <p class="advanced-title mb-0">고급 포트 타깃 (Transport / Probe / Retries)</p>
+                    <div class="d-flex gap-2">
+                      <button id="tplAdBtn" type="button" class="btn btn-sm btn-outline-info">AD 템플릿</button>
+                      <button id="tplWebBtn" type="button" class="btn btn-sm btn-outline-info">WEB 템플릿</button>
+                      <button id="tplDbBtn" type="button" class="btn btn-sm btn-outline-info">DB 템플릿</button>
+                    </div>
+                  </div>
                   <div class="row g-2 align-items-end">
                     <div class="col-12 col-md-3">
                       <label for="advancedPort" class="form-label">Port</label>
@@ -233,7 +240,9 @@
                         <option value="http">http</option>
                         <option value="https">https</option>
                         <option value="rdp">rdp</option>
-                        <option value="dns">dns</option>
+                        <option value="dns_a">dns_a</option>
+                        <option value="dns_srv">dns_srv</option>
+                        <option value="dns_soa">dns_soa</option>
                         <option value="ntp">ntp</option>
                       </select>
                     </div>
@@ -242,7 +251,7 @@
                       <input id="advancedRetries" type="number" min="0" max="5" class="form-control" value="2" />
                     </div>
                     <div class="col-12 col-md-1 d-grid">
-                      <button id="addPortTargetBtn" type="button" class="btn btn-ghost">+</button>
+                      <button id="addPortTargetBtn" type="button" class="btn btn-ghost">추가</button>
                     </div>
                   </div>
                   <p class="panel-note mt-2 mb-2">
@@ -256,12 +265,13 @@
                           <th>Transport</th>
                           <th>Probe</th>
                           <th>Retries</th>
+                          <th>수정</th>
                           <th>삭제</th>
                         </tr>
                       </thead>
                       <tbody id="portTargetBody">
                         <tr>
-                          <td colspan="5" class="text-muted py-2">고급 타깃이 없습니다.</td>
+                          <td colspan="6" class="text-muted py-2">고급 타깃이 없습니다.</td>
                         </tr>
                       </tbody>
                     </table>
@@ -323,6 +333,6 @@
       integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz"
       crossorigin="anonymous"
     ></script>
-    <script src="/static/app.js?v=20260526-2"></script>
+    <script src="/static/app.js?v=20260527-1"></script>
   </body>
 </html>
