@@ -2,17 +2,20 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import inspect
 import os
-import struct
 import socket
 import ssl
+import struct
 from collections import Counter
 from contextlib import suppress
 from datetime import datetime, timezone
 from time import perf_counter
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from ..models import PortStatus, PortTarget, ProbeType, ServerTarget
+
+ProgressCallback = Callable[[dict[str, Any]], Awaitable[None] | None]
 
 WINSOCK_ERRNO_NAMES = {
     10013: "WSAEACCES",
@@ -36,20 +39,55 @@ AUTO_UDP_PROBE_PORTS: dict[int, ProbeType] = {
     123: "ntp",
 }
 
-RETRYABLE_STATUSES: set[str] = {"TIMEOUT", "FILTERED", "ERROR", "PROBE_TIMEOUT"}
+RETRYABLE_STATUSES: set[str] = {
+    "TIMEOUT",
+    "FILTERED",
+    "ERROR",
+    "PROBE_TIMEOUT",
+    "NETWORK_UNREACHABLE",
+    "HOST_UNREACHABLE",
+    "NO_ROUTE",
+    "UDP_OPEN_OR_FILTERED",
+}
+NON_RETRYABLE_STATUSES: set[str] = {"OPEN", "REFUSED", "UNKNOWN_HOST", "UDP_CLOSED"}
+
+ADAPTIVE_REASON_MULTIPLIERS: dict[str, float] = {
+    "WSAETIMEDOUT": 1.2,
+    "ETIMEDOUT": 1.2,
+    "NO_UDP_RESPONSE": 1.0,
+    "WSAENETUNREACH": 1.7,
+    "ENETUNREACH": 1.7,
+    "WSAEHOSTUNREACH": 1.5,
+    "EHOSTUNREACH": 1.5,
+    "WSAEACCES": 1.4,
+}
 
 REASON_CODE_ACTION_GUIDE = {
-    "WSAETIMEDOUT": "타임아웃: 대상/중간 방화벽 드롭 정책과 경로 지연을 확인하세요.",
-    "ETIMEDOUT": "타임아웃: 대상 서비스 지연 또는 네트워크 드롭 여부를 확인하세요.",
-    "WSAENETUNREACH": "네트워크 도달 불가: 라우팅 테이블, 게이트웨이, VLAN 구성을 확인하세요.",
-    "ENETUNREACH": "네트워크 도달 불가: 경로 및 서브넷 설정을 확인하세요.",
-    "WSAEHOSTUNREACH": "호스트 도달 불가: 대상 서버 전원 및 NIC 연결 상태를 확인하세요.",
-    "EHOSTUNREACH": "호스트 도달 불가: 대상 IP와 네트워크 경로를 확인하세요.",
-    "WSAECONNREFUSED": "포트 거절: 서비스 미기동 또는 리슨 포트 오설정 가능성이 큽니다.",
-    "ECONNREFUSED": "포트 거절: 대상 서비스가 해당 포트를 리슨 중인지 확인하세요.",
-    "WSAEACCES": "접근 차단: 로컬/원격 방화벽 또는 보안정책(EDR/ACL) 확인이 필요합니다.",
-    "EAI_NONAME": "호스트명 해석 실패: DNS 서버 설정 및 호스트명 오타를 확인하세요.",
-    "NO_UDP_RESPONSE": "UDP 무응답: UDP는 무응답이 정상일 수 있습니다. DNS/NTP 프로브 결과를 함께 확인하세요.",
+    "WSAETIMEDOUT": "No response before timeout. Check firewall/ACL and service latency.",
+    "ETIMEDOUT": "No response before timeout. Validate routing and service responsiveness.",
+    "WSAENETUNREACH": "Network unreachable. Check gateway, route table, VLAN and vSwitch path.",
+    "ENETUNREACH": "Network unreachable. Validate subnet path and upstream routing.",
+    "WSAEHOSTUNREACH": "Host unreachable. Check server power state/NIC and path policy.",
+    "EHOSTUNREACH": "Host unreachable. Validate destination host and path.",
+    "WSAECONNREFUSED": "Target reachable but port is not listening.",
+    "ECONNREFUSED": "Target reachable but service is not listening on this port.",
+    "WSAEACCES": "Blocked by local/remote policy. Check firewall, EDR and ACL controls.",
+    "EAI_NONAME": "DNS resolve failed. Verify hostname and DNS resolver settings.",
+    "NO_UDP_RESPONSE": "UDP may be open-silent or filtered. Validate with DNS/NTP probe details.",
+}
+
+STATUS_PRIORITY_DEFAULT: dict[str, int] = {
+    "OPEN": 1000,
+    "REFUSED": 920,
+    "NO_ROUTE": 900,
+    "HOST_UNREACHABLE": 860,
+    "NETWORK_UNREACHABLE": 850,
+    "UNKNOWN_HOST": 840,
+    "UDP_CLOSED": 820,
+    "FILTERED": 780,
+    "TIMEOUT": 760,
+    "UDP_OPEN_OR_FILTERED": 730,
+    "ERROR": 100,
 }
 
 
@@ -146,26 +184,26 @@ def _recommended_action(status: PortStatus, transport: str, probe_status: str, r
     if reason_code in REASON_CODE_ACTION_GUIDE:
         return REASON_CODE_ACTION_GUIDE[reason_code]
     if status == "OPEN" and probe_status == "PROBE_OK":
-        return "접속 및 애플리케이션 응답이 정상입니다."
+        return "Port and application probe are healthy."
     if status == "OPEN" and probe_status in {"PROBE_FAILED", "INVALID_RESPONSE", "PROBE_TIMEOUT"}:
-        return "포트는 열려 있으나 앱 응답이 비정상입니다. 서비스 프로세스/앱 로그를 확인하세요."
+        return "Port is open but application protocol failed. Check app/service logs."
     if status == "REFUSED":
-        return "대상은 도달되지만 서비스가 포트를 리슨하지 않습니다. 서비스 실행 상태를 확인하세요."
+        return "Target is reachable, but the service is not listening on this port."
     if status in {"TIMEOUT", "FILTERED"}:
-        return "방화벽/보안장비 드롭 가능성이 높습니다. 인바운드/아웃바운드 및 ACL 정책을 점검하세요."
+        return "Possible firewall drop/policy block. Validate inbound/outbound and ACL policies."
     if status == "NO_ROUTE":
-        return "라우팅 경로가 없습니다. 게이트웨이, 정적 라우트, Hyper-V vSwitch 구성을 확인하세요."
+        return "No path to host. Verify gateway/static route/Hyper-V vSwitch path."
     if status in {"NETWORK_UNREACHABLE", "HOST_UNREACHABLE"}:
-        return "네트워크/호스트 도달 불가입니다. 대상 IP, 서브넷, VLAN, 전원 상태를 확인하세요."
+        return "Unreachable path. Verify subnet/VLAN route and destination host network state."
     if status == "UNKNOWN_HOST":
-        return "호스트명 해석 실패입니다. DNS 설정 또는 IP 직접 입력을 확인하세요."
+        return "Hostname resolution failed. Verify DNS settings or use direct IP."
     if status == "UDP_OPEN_OR_FILTERED":
-        return "UDP는 무응답이 정상일 수 있습니다. DNS/NTP 같은 프로토콜 프로브를 함께 사용하세요."
+        return "UDP can be silent. Validate with DNS/NTP application probe data."
     if status == "UDP_CLOSED":
-        return "UDP 포트가 닫혀 있거나 ICMP Port Unreachable 응답을 받았습니다."
+        return "UDP appears closed (ICMP Port Unreachable)."
     if transport == "udp" and probe_status == "PROBE_TIMEOUT":
-        return "UDP 프로브 응답이 없습니다. 서비스 기동 여부와 중간 장비 드롭 정책을 확인하세요."
-    return "상세 오류코드(reason_code)와 서버 로그를 기반으로 추가 점검이 필요합니다."
+        return "UDP probe timed out. Verify service bind state and middlebox policy."
+    return "Check reason_code plus target-side logs for deeper diagnosis."
 
 
 async def _tcp_attempt(host: str, port: int, timeout_seconds: float, attempt: int) -> dict[str, Any]:
@@ -285,7 +323,7 @@ def _udp_attempt_sync(host: str, port: int, timeout_seconds: float, attempt: int
         attempt=attempt,
         status="ERROR",
         reason_code="UDP_UNKNOWN",
-        detail="UDP probe failed for unknown reason.",
+        detail="UDP attempt failed for unknown reason.",
         latency_ms=(perf_counter() - started) * 1000,
     )
 
@@ -330,6 +368,7 @@ async def _http_probe(host: str, port: int, timeout_seconds: float, use_tls: boo
             return {
                 "probe_status": "INVALID_RESPONSE",
                 "probe_detail": f"Unexpected HTTP response line: {text}",
+                "probe_meta": {"raw_response_line": text},
                 "probe_latency_ms": round((perf_counter() - started) * 1000, 2),
             }
 
@@ -337,6 +376,7 @@ async def _http_probe(host: str, port: int, timeout_seconds: float, use_tls: boo
         return {
             "probe_status": "PROBE_OK",
             "probe_detail": f"HTTP response received: {status_code}",
+            "probe_meta": {"http_status": status_code},
             "probe_latency_ms": round((perf_counter() - started) * 1000, 2),
         }
     except asyncio.TimeoutError:
@@ -374,18 +414,20 @@ async def _rdp_probe(host: str, port: int, timeout_seconds: float) -> dict[str, 
         packet = bytes.fromhex("030000130ee000000000000100080003000000")
         writer.write(packet)
         await asyncio.wait_for(writer.drain(), timeout=timeout_seconds)
-        response = await asyncio.wait_for(reader.read(64), timeout=timeout_seconds)
+        response = await asyncio.wait_for(reader.read(96), timeout=timeout_seconds)
 
         if len(response) >= 7 and response[0] == 0x03 and response[5] in {0xD0, 0xF0}:
             return {
                 "probe_status": "PROBE_OK",
                 "probe_detail": "RDP negotiation response received.",
+                "probe_meta": {"response_hex": response[:48].hex()},
                 "probe_latency_ms": round((perf_counter() - started) * 1000, 2),
             }
         if response:
             return {
                 "probe_status": "INVALID_RESPONSE",
                 "probe_detail": f"Unexpected RDP response bytes: {response.hex()}",
+                "probe_meta": {"response_hex": response[:96].hex()},
                 "probe_latency_ms": round((perf_counter() - started) * 1000, 2),
             }
         return {
@@ -431,6 +473,7 @@ DNS_TYPE_NAME = {
     16: "TXT",
     28: "AAAA",
     33: "SRV",
+    41: "OPT",
 }
 
 DNS_QUERY_NAME_BY_PROBE = {
@@ -452,14 +495,21 @@ def _encode_dns_name(name: str) -> bytes:
     return encoded + b"\x00"
 
 
+def _build_edns_opt_record(udp_payload_size: int = 1232, do_bit: bool = False) -> bytes:
+    flags = 0x8000 if do_bit else 0x0000
+    ttl = flags
+    return b"\x00" + struct.pack("!HHIH", 41, udp_payload_size, ttl, 0)
+
+
 def _build_dns_query_packet(probe_type: ProbeType) -> tuple[int, bytes, int, str]:
     normalized_probe = probe_type if probe_type in DNS_QTYPE_BY_PROBE else "dns_a"
     tx_id = int.from_bytes(os.urandom(2), "big")
     query_name = DNS_QUERY_NAME_BY_PROBE[normalized_probe]
     qtype = DNS_QTYPE_BY_PROBE[normalized_probe]
-    header = struct.pack("!HHHHHH", tx_id, 0x0100, 1, 0, 0, 0)
+    # RD=1, QD=1, AR=1(EDNS OPT)
+    header = struct.pack("!HHHHHH", tx_id, 0x0100, 1, 0, 0, 1)
     question = _encode_dns_name(query_name) + struct.pack("!HH", qtype, 1)  # QCLASS=IN
-    return tx_id, header + question, qtype, query_name
+    return tx_id, header + question + _build_edns_opt_record(), qtype, query_name
 
 
 def _decode_dns_name(
@@ -532,7 +582,28 @@ def _dns_type_name(qtype: int) -> str:
     return DNS_TYPE_NAME.get(qtype, f"TYPE{qtype}")
 
 
-def _parse_dns_rr(packet: bytes, offset: int) -> tuple[dict[str, Any], int]:
+def _parse_edns_options(rdata: bytes) -> list[dict[str, Any]]:
+    options: list[dict[str, Any]] = []
+    cursor = 0
+    while cursor + 4 <= len(rdata):
+        option_code, option_len = struct.unpack("!HH", rdata[cursor : cursor + 4])
+        cursor += 4
+        end = cursor + option_len
+        if end > len(rdata):
+            break
+        option_raw = rdata[cursor:end]
+        options.append(
+            {
+                "code": option_code,
+                "length": option_len,
+                "data_hex": option_raw[:64].hex(),
+            }
+        )
+        cursor = end
+    return options
+
+
+def _parse_dns_rr(packet: bytes, offset: int, section: str) -> tuple[dict[str, Any], int]:
     name, cursor = _decode_dns_name(packet, offset)
     if cursor + 10 > len(packet):
         raise ValueError("DNS resource record header truncated.")
@@ -545,6 +616,7 @@ def _parse_dns_rr(packet: bytes, offset: int) -> tuple[dict[str, Any], int]:
         raise ValueError("DNS resource record data truncated.")
 
     parsed: dict[str, Any] = {
+        "section": section,
         "name": name,
         "type": rtype,
         "type_name": _dns_type_name(rtype),
@@ -570,13 +642,13 @@ def _parse_dns_rr(packet: bytes, offset: int) -> tuple[dict[str, Any], int]:
         parsed["exchange"] = exchange
     elif rtype == 16 and rdlength >= 1:  # TXT
         txt_values: list[str] = []
-        cursor = rdata_start
-        while cursor < rdata_end:
-            text_len = packet[cursor]
-            cursor += 1
-            end = min(cursor + text_len, rdata_end)
-            txt_values.append(packet[cursor:end].decode("utf-8", errors="ignore"))
-            cursor = end
+        txt_cursor = rdata_start
+        while txt_cursor < rdata_end:
+            text_len = packet[txt_cursor]
+            txt_cursor += 1
+            end = min(txt_cursor + text_len, rdata_end)
+            txt_values.append(packet[txt_cursor:end].decode("utf-8", errors="ignore"))
+            txt_cursor = end
         parsed["txt"] = txt_values
     elif rtype == 6:  # SOA
         mname, soa_cursor = _decode_dns_name(packet, rdata_start)
@@ -593,142 +665,285 @@ def _parse_dns_rr(packet: bytes, offset: int) -> tuple[dict[str, Any], int]:
             parsed["retry"] = retry
             parsed["expire"] = expire
             parsed["minimum"] = minimum
+    elif rtype == 41:  # OPT (EDNS0)
+        ext_rcode = (ttl >> 24) & 0xFF
+        edns_version = (ttl >> 16) & 0xFF
+        z = ttl & 0xFFFF
+        parsed["udp_payload_size"] = rclass
+        parsed["extended_rcode"] = ext_rcode
+        parsed["edns_version"] = edns_version
+        parsed["dnssec_ok"] = bool(z & 0x8000)
+        parsed["z_flags"] = z
+        parsed["options"] = _parse_edns_options(packet[rdata_start:rdata_end])
     else:
-        preview = packet[rdata_start:rdata_end][:16]
+        preview = packet[rdata_start:rdata_end][:24]
         parsed["rdata_hex"] = preview.hex()
 
     return parsed, rdata_end
 
 
-def _parse_dns_answers(packet: bytes, question_count: int, answer_count: int) -> list[dict[str, Any]]:
+def _parse_dns_sections(
+    packet: bytes,
+    question_count: int,
+    answer_count: int,
+    authority_count: int,
+    additional_count: int,
+) -> dict[str, list[dict[str, Any]]]:
     cursor = _skip_dns_questions(packet, 12, question_count)
+
     answers: list[dict[str, Any]] = []
+    authorities: list[dict[str, Any]] = []
+    additionals: list[dict[str, Any]] = []
+
     for _ in range(answer_count):
-        answer, cursor = _parse_dns_rr(packet, cursor)
-        answers.append(answer)
-    return answers
+        record, cursor = _parse_dns_rr(packet, cursor, "answer")
+        answers.append(record)
+    for _ in range(authority_count):
+        record, cursor = _parse_dns_rr(packet, cursor, "authority")
+        authorities.append(record)
+    for _ in range(additional_count):
+        record, cursor = _parse_dns_rr(packet, cursor, "additional")
+        additionals.append(record)
+
+    return {
+        "answers": answers,
+        "authorities": authorities,
+        "additionals": additionals,
+    }
 
 
-def _dns_answer_summary(answers: list[dict[str, Any]], max_items: int = 3) -> str:
-    if not answers:
-        return "no answer records"
-
-    summary_items: list[str] = []
-    for answer in answers[:max_items]:
-        type_name = str(answer.get("type_name", "UNKNOWN"))
+def _dns_records_summary(
+    answers: list[dict[str, Any]],
+    authorities: list[dict[str, Any]],
+    additionals: list[dict[str, Any]],
+    max_items: int = 3,
+) -> str:
+    def summarize(record: dict[str, Any]) -> str:
+        type_name = str(record.get("type_name", "UNKNOWN"))
         if type_name == "A":
-            summary_items.append(f"A {answer.get('address', '-')}")
-        elif type_name == "AAAA":
-            summary_items.append(f"AAAA {answer.get('address', '-')}")
-        elif type_name == "MX":
-            summary_items.append(
-                f"MX {answer.get('preference', '-')}"
-                f" {answer.get('exchange', '-')}"
-            )
-        elif type_name == "TXT":
-            txt_values = answer.get("txt") or []
+            return f"A {record.get('address', '-')}"
+        if type_name == "AAAA":
+            return f"AAAA {record.get('address', '-')}"
+        if type_name == "MX":
+            return f"MX {record.get('preference', '-')}" f" {record.get('exchange', '-')}"
+        if type_name == "TXT":
+            txt_values = record.get("txt") or []
             joined = " | ".join(str(item) for item in txt_values[:2])
-            summary_items.append(f"TXT {joined or '-'}")
-        elif type_name == "SRV":
-            summary_items.append(
+            return f"TXT {joined or '-'}"
+        if type_name == "SRV":
+            return (
                 "SRV "
-                f"{answer.get('priority', '-')}/{answer.get('weight', '-')}/{answer.get('port', '-')}"
-                f" -> {answer.get('target', '-')}"
+                f"{record.get('priority', '-')}/{record.get('weight', '-')}/{record.get('port', '-')}"
+                f" -> {record.get('target', '-')}"
             )
-        elif type_name == "SOA":
-            summary_items.append(
+        if type_name == "SOA":
+            return (
                 "SOA "
-                f"{answer.get('mname', '-')} {answer.get('rname', '-')}"
-                f" serial={answer.get('serial', '-')}"
+                f"{record.get('mname', '-')} {record.get('rname', '-')}"
+                f" serial={record.get('serial', '-')}"
             )
-        else:
-            summary_items.append(f"{type_name} {answer.get('name', '-')}")
+        if type_name == "OPT":
+            return (
+                "OPT "
+                f"udp={record.get('udp_payload_size', '-')}"
+                f" ver={record.get('edns_version', '-')}"
+            )
+        return f"{type_name} {record.get('name', '-')}"
 
-    if len(answers) > max_items:
-        summary_items.append(f"+{len(answers) - max_items} more")
-    return "; ".join(summary_items)
+    source = answers or authorities or additionals
+    if not source:
+        return "no records"
+    items = [summarize(item) for item in source[:max_items]]
+    if len(source) > max_items:
+        items.append(f"+{len(source) - max_items} more")
+    return "; ".join(items)
+
+
+def _extract_edns_meta(additionals: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for record in additionals:
+        if record.get("type") == 41 or record.get("type_name") == "OPT":
+            return {
+                "udp_payload_size": record.get("udp_payload_size"),
+                "extended_rcode": record.get("extended_rcode"),
+                "edns_version": record.get("edns_version"),
+                "dnssec_ok": record.get("dnssec_ok"),
+                "options": record.get("options") or [],
+            }
+    return None
+
+
+def _recv_exact(sock: socket.socket, size: int) -> bytes:
+    chunks: list[bytes] = []
+    remaining = size
+    while remaining > 0:
+        data = sock.recv(remaining)
+        if not data:
+            raise OSError("Socket closed while receiving data.")
+        chunks.append(data)
+        remaining -= len(data)
+    return b"".join(chunks)
 
 
 def _dns_probe_sync(host: str, port: int, timeout_seconds: float, probe_type: ProbeType) -> dict[str, Any]:
     started = perf_counter()
     query_id, packet, qtype, query_name = _build_dns_query_packet(probe_type)
     qtype_name = _dns_type_name(qtype)
+
+    def build_result(
+        *,
+        probe_status: str,
+        probe_detail: str,
+        probe_meta: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "probe_status": probe_status,
+            "probe_detail": probe_detail,
+            "probe_meta": probe_meta or {},
+            "probe_latency_ms": round((perf_counter() - started) * 1000, 2),
+        }
+
     try:
         addr_infos = socket.getaddrinfo(host, port, type=socket.SOCK_DGRAM)
     except socket.gaierror as exc:
-        return {
-            "probe_status": "PROBE_FAILED",
-            "probe_detail": f"DNS probe resolve failed: {exc}",
-            "probe_latency_ms": round((perf_counter() - started) * 1000, 2),
-        }
+        return build_result(
+            probe_status="PROBE_FAILED",
+            probe_detail=f"DNS probe resolve failed: {exc}",
+            probe_meta={"query_type": qtype, "query_name": query_name},
+        )
 
     family, socktype, proto, _, sockaddr = addr_infos[0]
-    sock = socket.socket(family, socktype, proto)
-    sock.settimeout(timeout_seconds)
+    udp_response: bytes | None = None
+    used_transport = "udp"
+    tcp_fallback = False
+    tc_flag = 0
     try:
-        sock.sendto(packet, sockaddr)
-        response, _ = sock.recvfrom(512)
-        if len(response) < 12:
-            return {
-                "probe_status": "INVALID_RESPONSE",
-                "probe_detail": "DNS response too short.",
-                "probe_meta": {"query_type": qtype, "query_name": query_name},
-                "probe_latency_ms": round((perf_counter() - started) * 1000, 2),
-            }
-        response_id = int.from_bytes(response[:2], "big")
-        qr = (response[2] >> 7) & 0x01
-        qdcount = int.from_bytes(response[4:6], "big")
-        rcode = response[3] & 0x0F
-        ancount = int.from_bytes(response[6:8], "big")
-        if response_id != query_id or qr != 1:
-            return {
-                "probe_status": "INVALID_RESPONSE",
-                "probe_detail": "DNS response header is invalid.",
-                "probe_meta": {"query_type": qtype, "query_name": query_name},
-                "probe_latency_ms": round((perf_counter() - started) * 1000, 2),
-            }
-
-        parse_error: str | None = None
-        answers: list[dict[str, Any]] = []
+        sock = socket.socket(family, socktype, proto)
+        sock.settimeout(timeout_seconds)
         try:
-            answers = _parse_dns_answers(response, qdcount, ancount)
-        except Exception as exc:  # Keep probe as OK if DNS response is valid.
-            parse_error = str(exc)
-
-        summary = _dns_answer_summary(answers)
-        detail = f"DNS {qtype_name} response received (rcode={rcode}, answers={ancount})"
-        if summary:
-            detail = f"{detail}: {summary}"
-        return {
-            "probe_status": "PROBE_OK",
-            "probe_detail": detail,
-            "probe_meta": {
-                "query_type": qtype,
-                "query_type_name": qtype_name,
-                "query_name": query_name,
-                "rcode": rcode,
-                "answer_count": ancount,
-                "answers": answers[:10],
-                "parse_error": parse_error,
-            },
-            "probe_latency_ms": round((perf_counter() - started) * 1000, 2),
-        }
+            sock.sendto(packet, sockaddr)
+            udp_response, _ = sock.recvfrom(4096)
+        finally:
+            sock.close()
     except socket.timeout:
-        return {
-            "probe_status": "PROBE_TIMEOUT",
-            "probe_detail": f"DNS probe timeout after {timeout_seconds:.1f}s.",
-            "probe_meta": {"query_type": qtype, "query_name": query_name},
-            "probe_latency_ms": round((perf_counter() - started) * 1000, 2),
-        }
+        return build_result(
+            probe_status="PROBE_TIMEOUT",
+            probe_detail=f"DNS probe timeout after {timeout_seconds:.1f}s.",
+            probe_meta={"query_type": qtype, "query_name": query_name},
+        )
     except OSError as exc:
-        return {
-            "probe_status": "PROBE_FAILED",
-            "probe_detail": f"DNS probe failed: {exc}",
-            "probe_meta": {"query_type": qtype, "query_name": query_name},
-            "probe_latency_ms": round((perf_counter() - started) * 1000, 2),
-        }
-    finally:
-        sock.close()
+        return build_result(
+            probe_status="PROBE_FAILED",
+            probe_detail=f"DNS probe failed: {exc}",
+            probe_meta={"query_type": qtype, "query_name": query_name},
+        )
+
+    if not udp_response or len(udp_response) < 12:
+        return build_result(
+            probe_status="INVALID_RESPONSE",
+            probe_detail="DNS response too short.",
+            probe_meta={"query_type": qtype, "query_name": query_name},
+        )
+
+    response = udp_response
+    response_id = int.from_bytes(response[:2], "big")
+    flags = int.from_bytes(response[2:4], "big")
+    qr = (flags >> 15) & 0x01
+    tc_flag = (flags >> 9) & 0x01
+
+    if tc_flag == 1:
+        # TC bit set: retry over TCP for full answer fidelity.
+        try:
+            stream_family = family if family in {socket.AF_INET, socket.AF_INET6} else socket.AF_INET
+            tcp_sock = socket.socket(stream_family, socket.SOCK_STREAM)
+            tcp_sock.settimeout(timeout_seconds)
+            try:
+                tcp_sock.connect(sockaddr)
+                tcp_sock.sendall(struct.pack("!H", len(packet)) + packet)
+                length_prefix = _recv_exact(tcp_sock, 2)
+                message_length = int.from_bytes(length_prefix, "big")
+                response = _recv_exact(tcp_sock, message_length)
+                used_transport = "tcp"
+                tcp_fallback = True
+            finally:
+                tcp_sock.close()
+        except OSError:
+            # Keep UDP payload and expose truncated state if TCP fallback fails.
+            response = udp_response
+
+    if len(response) < 12:
+        return build_result(
+            probe_status="INVALID_RESPONSE",
+            probe_detail="DNS response header is invalid after TCP fallback.",
+            probe_meta={"query_type": qtype, "query_name": query_name},
+        )
+
+    flags = int.from_bytes(response[2:4], "big")
+    qr = (flags >> 15) & 0x01
+    rcode = flags & 0x0F
+    qdcount = int.from_bytes(response[4:6], "big")
+    ancount = int.from_bytes(response[6:8], "big")
+    nscount = int.from_bytes(response[8:10], "big")
+    arcount = int.from_bytes(response[10:12], "big")
+
+    if response_id != query_id or qr != 1:
+        return build_result(
+            probe_status="INVALID_RESPONSE",
+            probe_detail="DNS response header is invalid.",
+            probe_meta={"query_type": qtype, "query_name": query_name},
+        )
+
+    parse_error: str | None = None
+    answers: list[dict[str, Any]] = []
+    authorities: list[dict[str, Any]] = []
+    additionals: list[dict[str, Any]] = []
+    edns_meta: dict[str, Any] | None = None
+
+    try:
+        sections = _parse_dns_sections(response, qdcount, ancount, nscount, arcount)
+        answers = sections["answers"]
+        authorities = sections["authorities"]
+        additionals = sections["additionals"]
+        edns_meta = _extract_edns_meta(additionals)
+    except Exception as exc:
+        parse_error = str(exc)
+
+    summary = _dns_records_summary(answers, authorities, additionals)
+    ext_rcode = 0
+    if edns_meta and isinstance(edns_meta.get("extended_rcode"), int):
+        ext_rcode = int(edns_meta["extended_rcode"])
+    full_rcode = (ext_rcode << 4) | rcode
+    detail = (
+        f"DNS {qtype_name} response via {used_transport.upper()} "
+        f"(rcode={full_rcode}, answers={ancount}, auth={nscount}, add={arcount})"
+    )
+    if summary:
+        detail = f"{detail}: {summary}"
+
+    return build_result(
+        probe_status="PROBE_OK",
+        probe_detail=detail,
+        probe_meta={
+            "query_type": qtype,
+            "query_type_name": qtype_name,
+            "query_name": query_name,
+            "rcode": rcode,
+            "extended_rcode": ext_rcode,
+            "full_rcode": full_rcode,
+            "answer_count": ancount,
+            "authority_count": nscount,
+            "additional_count": arcount,
+            "truncated_udp": bool(tc_flag),
+            "fallback_to_tcp": tcp_fallback,
+            "response_transport": used_transport,
+            "answers": answers[:12],
+            "authorities": authorities[:12],
+            "additionals": additionals[:12],
+            "edns": edns_meta,
+            "parse_error": parse_error,
+            "raw_query_hex": packet[:96].hex(),
+            "raw_response_hex": response[:256].hex(),
+        },
+    )
 
 
 def _ntp_probe_sync(host: str, port: int, timeout_seconds: float) -> dict[str, Any]:
@@ -753,6 +968,7 @@ def _ntp_probe_sync(host: str, port: int, timeout_seconds: float) -> dict[str, A
             return {
                 "probe_status": "INVALID_RESPONSE",
                 "probe_detail": "NTP response too short.",
+                "probe_meta": {"response_hex": response[:96].hex()},
                 "probe_latency_ms": round((perf_counter() - started) * 1000, 2),
             }
         first_byte = response[0]
@@ -763,13 +979,23 @@ def _ntp_probe_sync(host: str, port: int, timeout_seconds: float) -> dict[str, A
             return {
                 "probe_status": "INVALID_RESPONSE",
                 "probe_detail": f"Unexpected NTP mode: {mode} (version={version}, stratum={stratum})",
-                "probe_meta": {"mode": mode, "version": version, "stratum": stratum},
+                "probe_meta": {
+                    "mode": mode,
+                    "version": version,
+                    "stratum": stratum,
+                    "response_hex": response[:96].hex(),
+                },
                 "probe_latency_ms": round((perf_counter() - started) * 1000, 2),
             }
         return {
             "probe_status": "PROBE_OK",
             "probe_detail": f"NTP response received (version={version}, stratum={stratum}, mode={mode}).",
-            "probe_meta": {"mode": mode, "version": version, "stratum": stratum},
+            "probe_meta": {
+                "mode": mode,
+                "version": version,
+                "stratum": stratum,
+                "response_hex": response[:96].hex(),
+            },
             "probe_latency_ms": round((perf_counter() - started) * 1000, 2),
         }
     except socket.timeout:
@@ -806,45 +1032,85 @@ async def _run_application_probe(host: str, port: int, probe_type: ProbeType, ti
     }
 
 
-def _choose_final_status(attempts: list[dict[str, Any]], transport: str) -> PortStatus:
-    statuses = [str(item["status"]) for item in attempts]
-    if "OPEN" in statuses:
-        return "OPEN"
-    if transport == "udp" and "UDP_OPEN_OR_FILTERED" in statuses:
-        return "UDP_OPEN_OR_FILTERED"
-    if transport == "udp" and "UDP_CLOSED" in statuses:
-        return "UDP_CLOSED"
-    if "REFUSED" in statuses:
-        return "REFUSED"
-    if "NO_ROUTE" in statuses:
-        return "NO_ROUTE"
-    if "HOST_UNREACHABLE" in statuses:
-        return "HOST_UNREACHABLE"
-    if "NETWORK_UNREACHABLE" in statuses:
-        return "NETWORK_UNREACHABLE"
-    if "UNKNOWN_HOST" in statuses:
-        return "UNKNOWN_HOST"
-    if statuses and all(status in {"TIMEOUT", "FILTERED"} for status in statuses):
-        return "FILTERED"
-    if "TIMEOUT" in statuses:
-        return "TIMEOUT"
-    if "FILTERED" in statuses:
-        return "FILTERED"
-    return "ERROR"
+def _status_priority(status: str, overrides: dict[str, int] | None = None) -> int:
+    name = status.upper()
+    if overrides and name in overrides:
+        return int(overrides[name])
+    return STATUS_PRIORITY_DEFAULT.get(name, 0)
 
 
-def _should_retry(status: PortStatus) -> bool:
-    return status in RETRYABLE_STATUSES
+def _choose_final_status(
+    attempts: list[dict[str, Any]],
+    *,
+    status_priority_overrides: dict[str, int] | None = None,
+) -> PortStatus:
+    if not attempts:
+        return "ERROR"
+
+    statuses = [str(item["status"]).upper() for item in attempts]
+    counter = Counter(statuses)
+    ranked = sorted(
+        counter.items(),
+        key=lambda item: (
+            _status_priority(item[0], status_priority_overrides),
+            item[1],  # frequency
+            max(i for i, status in enumerate(statuses) if status == item[0]),  # last seen
+        ),
+        reverse=True,
+    )
+    chosen = ranked[0][0]
+    return chosen if chosen in STATUS_PRIORITY_DEFAULT else "ERROR"
 
 
-def _consistency_indicator(attempts: list[dict[str, Any]]) -> tuple[str, float]:
+def _should_retry(
+    *,
+    status: PortStatus,
+    reason_code: str,
+    attempt_no: int,
+    max_attempts: int,
+) -> bool:
+    if attempt_no >= max_attempts:
+        return False
+    if status in NON_RETRYABLE_STATUSES:
+        return False
+    if status in RETRYABLE_STATUSES:
+        return True
+    # Retry unknown status only for known transient reason codes.
+    return reason_code in ADAPTIVE_REASON_MULTIPLIERS
+
+
+def _adaptive_backoff_seconds(
+    *,
+    base_ms: int,
+    cap_ms: int,
+    attempt_no: int,
+    status: PortStatus,
+    reason_code: str,
+) -> float:
+    if base_ms <= 0 or cap_ms <= 0:
+        return 0.0
+
+    multiplier = ADAPTIVE_REASON_MULTIPLIERS.get(reason_code, 1.0)
+    if status in {"TIMEOUT", "FILTERED"}:
+        multiplier = max(multiplier, 1.3)
+    elif status in {"NETWORK_UNREACHABLE", "HOST_UNREACHABLE", "NO_ROUTE"}:
+        multiplier = max(multiplier, 1.7)
+    elif status == "UDP_OPEN_OR_FILTERED":
+        multiplier = max(multiplier, 1.1)
+
+    expo = 2 ** max(attempt_no - 1, 0)
+    delay_ms = min(int(base_ms * expo * multiplier), cap_ms)
+    return round(delay_ms / 1000.0, 4)
+
+
+def _consistency_indicator(attempts: list[dict[str, Any]], threshold_percent: float) -> tuple[str, float]:
     if not attempts:
         return ("UNKNOWN", 0.0)
     statuses = [str(item["status"]) for item in attempts]
     counter = Counter(statuses)
     most_common_count = counter.most_common(1)[0][1]
     score = round((most_common_count / len(statuses)) * 100, 2)
-    label = "STABLE" if len(counter) == 1 else "FLAKY"
+    label = "STABLE" if score >= threshold_percent else "FLAKY"
     return (label, score)
 
 
@@ -859,6 +1125,14 @@ def _expand_server_port_targets(server: ServerTarget) -> list[PortTarget]:
     return list(deduped.values())
 
 
+async def _emit_progress(progress_callback: ProgressCallback | None, payload: dict[str, Any]) -> None:
+    if progress_callback is None:
+        return
+    maybe_result = progress_callback(payload)
+    if inspect.isawaitable(maybe_result):
+        await maybe_result
+
+
 async def check_single_port_target(
     *,
     server_id: str,
@@ -866,7 +1140,12 @@ async def check_single_port_target(
     host: str,
     target: PortTarget,
     timeout_seconds: float = 2.0,
+    probe_timeout_seconds: float | None = None,
     default_retries: int = 2,
+    retry_backoff_base_ms: int = 0,
+    retry_backoff_max_ms: int = 0,
+    flaky_threshold_percent: float = 100.0,
+    status_priority_overrides: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     check_started = perf_counter()
     retries = target.retries if target.retries is not None else default_retries
@@ -882,10 +1161,28 @@ async def check_single_port_target(
 
         if attempt["status"] == "OPEN":
             break
-        if not _should_retry(attempt["status"]):
+        if not _should_retry(
+            status=attempt["status"],
+            reason_code=str(attempt["reason_code"]),
+            attempt_no=attempt_no,
+            max_attempts=max_attempts,
+        ):
             break
 
-    final_status = _choose_final_status(attempts, target.transport)
+        backoff_seconds = _adaptive_backoff_seconds(
+            base_ms=retry_backoff_base_ms,
+            cap_ms=retry_backoff_max_ms,
+            attempt_no=attempt_no,
+            status=attempt["status"],
+            reason_code=str(attempt["reason_code"]),
+        )
+        if backoff_seconds > 0:
+            await asyncio.sleep(backoff_seconds)
+
+    final_status = _choose_final_status(
+        attempts,
+        status_priority_overrides=status_priority_overrides,
+    )
     final_attempt = attempts[-1]
     probe_type = _resolve_probe_type(target.probe, target.port, target.transport)
     probe_result = {
@@ -897,16 +1194,17 @@ async def check_single_port_target(
 
     can_probe_tcp = target.transport == "tcp" and final_status == "OPEN"
     can_probe_udp = target.transport == "udp" and final_status in {"OPEN", "UDP_OPEN_OR_FILTERED"}
+    probe_timeout = min(float(probe_timeout_seconds or timeout_seconds), timeout_seconds)
     if probe_type != "none" and (can_probe_tcp or can_probe_udp):
         probe_result = {
             "probe_type": probe_type,
-            **(await _run_application_probe(host, target.port, probe_type, timeout_seconds)),
+            **(await _run_application_probe(host, target.port, probe_type, probe_timeout)),
         }
 
     detail = final_attempt["detail"]
     if final_status == "FILTERED":
         detail = f"{detail} Final decision: likely filtered/dropped after {len(attempts)} attempts."
-    consistency, consistency_score = _consistency_indicator(attempts)
+    consistency, consistency_score = _consistency_indicator(attempts, threshold_percent=flaky_threshold_percent)
 
     total_elapsed = round((perf_counter() - check_started) * 1000, 2)
     return {
@@ -940,27 +1238,96 @@ async def check_single_port_target(
 async def run_port_sweep(
     servers: list[ServerTarget],
     timeout_seconds: float = 2.0,
+    probe_timeout_seconds: float | None = None,
     default_retries: int = 2,
+    max_concurrency: int = 200,
+    batch_size: int = 250,
+    retry_backoff_base_ms: int = 0,
+    retry_backoff_max_ms: int = 0,
+    flaky_threshold_percent: float = 100.0,
+    status_priority_overrides: dict[str, int] | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> dict[str, Any]:
     started = perf_counter()
-    tasks: list[asyncio.Task[dict[str, Any]]] = []
+    max_concurrency = max(1, int(max_concurrency))
+    batch_size = max(max_concurrency, int(batch_size))
 
+    expanded_targets: list[tuple[ServerTarget, PortTarget]] = []
     for server in servers:
         for target in _expand_server_port_targets(server):
-            tasks.append(
-                asyncio.create_task(
-                    check_single_port_target(
-                        server_id=server.id,
-                        server_name=server.name,
-                        host=server.host,
-                        target=target,
-                        timeout_seconds=timeout_seconds,
-                        default_retries=default_retries,
-                    )
-                )
+            expanded_targets.append((server, target))
+
+    total_targets = len(expanded_targets)
+    if total_targets == 0:
+        return {
+            "results": [],
+            "summary": {
+                "total_checks": 0,
+                "duration_ms": 0.0,
+                "status_counts": {},
+                "transport_counts": {},
+                "probe_status_counts": {},
+                "consistency_counts": {},
+                "batch_count": 0,
+                "max_concurrency": max_concurrency,
+            },
+        }
+
+    semaphore = asyncio.Semaphore(max_concurrency)
+    results: list[dict[str, Any]] = []
+    processed = 0
+    batch_count = 0
+
+    async def worker(server: ServerTarget, target: PortTarget) -> dict[str, Any]:
+        async with semaphore:
+            return await check_single_port_target(
+                server_id=server.id,
+                server_name=server.name,
+                host=server.host,
+                target=target,
+                timeout_seconds=timeout_seconds,
+                probe_timeout_seconds=probe_timeout_seconds,
+                default_retries=default_retries,
+                retry_backoff_base_ms=retry_backoff_base_ms,
+                retry_backoff_max_ms=retry_backoff_max_ms,
+                flaky_threshold_percent=flaky_threshold_percent,
+                status_priority_overrides=status_priority_overrides,
             )
 
-    results = await asyncio.gather(*tasks) if tasks else []
+    for batch_start in range(0, total_targets, batch_size):
+        chunk = expanded_targets[batch_start : batch_start + batch_size]
+        batch_count += 1
+        tasks = [asyncio.create_task(worker(server, target)) for server, target in chunk]
+        try:
+            for finished in asyncio.as_completed(tasks):
+                result = await finished
+                results.append(result)
+                processed += 1
+                await _emit_progress(
+                    progress_callback,
+                    {
+                        "processed": processed,
+                        "total": total_targets,
+                        "progress_percent": round((processed / total_targets) * 100, 2),
+                        "batch_index": batch_count,
+                        "batch_total": (total_targets + batch_size - 1) // batch_size,
+                        "last": {
+                            "server_name": result.get("server_name"),
+                            "host": result.get("host"),
+                            "port": result.get("port"),
+                            "transport": result.get("transport"),
+                            "status": result.get("status"),
+                            "reason_code": result.get("reason_code"),
+                        },
+                    },
+                )
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            with suppress(Exception):
+                await asyncio.gather(*tasks, return_exceptions=True)
+
     status_counts: dict[str, int] = {}
     transport_counts: dict[str, int] = {}
     probe_counts: dict[str, int] = {}
@@ -985,5 +1352,7 @@ async def run_port_sweep(
             "transport_counts": transport_counts,
             "probe_status_counts": probe_counts,
             "consistency_counts": consistency_counts,
+            "batch_count": batch_count,
+            "max_concurrency": max_concurrency,
         },
     }

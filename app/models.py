@@ -42,8 +42,21 @@ UDP_ONLY_PROBES = frozenset(
     }
 )
 
-CredentialSecretProvider = Literal["dpapi", "env", "azure_key_vault", "legacy_plaintext"]
-CredentialSecretProviderInput = Literal["dpapi", "env", "azure_key_vault"]
+CredentialSecretProvider = Literal[
+    "dpapi",
+    "env",
+    "azure_key_vault",
+    "aws_secrets_manager",
+    "hashicorp_vault",
+    "legacy_plaintext",
+]
+CredentialSecretProviderInput = Literal[
+    "dpapi",
+    "env",
+    "azure_key_vault",
+    "aws_secrets_manager",
+    "hashicorp_vault",
+]
 
 
 class PortTarget(BaseModel):
@@ -183,7 +196,12 @@ class CredentialProfile(BaseModel):
         if self.secret_provider == "dpapi":
             if not self.encrypted_password and not self.legacy_password:
                 raise ValueError("DPAPI profile requires encrypted_password.")
-        elif self.secret_provider in {"env", "azure_key_vault"}:
+        elif self.secret_provider in {
+            "env",
+            "azure_key_vault",
+            "aws_secrets_manager",
+            "hashicorp_vault",
+        }:
             if not self.secret_ref:
                 raise ValueError(f"{self.secret_provider} profile requires secret_ref.")
         elif self.secret_provider == "legacy_plaintext":
@@ -215,7 +233,12 @@ class CredentialProfileCreate(BaseModel):
     def validate_secret_input(self) -> "CredentialProfileCreate":
         if self.secret_provider == "dpapi" and not self.password:
             raise ValueError("password is required when secret_provider=dpapi.")
-        if self.secret_provider in {"env", "azure_key_vault"} and not self.secret_ref:
+        if self.secret_provider in {
+            "env",
+            "azure_key_vault",
+            "aws_secrets_manager",
+            "hashicorp_vault",
+        } and not self.secret_ref:
             raise ValueError("secret_ref is required for external secret providers.")
         return self
 
@@ -241,7 +264,12 @@ class CredentialProfileUpdate(BaseModel):
 
     @model_validator(mode="after")
     def validate_secret_input(self) -> "CredentialProfileUpdate":
-        if self.secret_provider in {"env", "azure_key_vault"} and not self.secret_ref:
+        if self.secret_provider in {
+            "env",
+            "azure_key_vault",
+            "aws_secrets_manager",
+            "hashicorp_vault",
+        } and not self.secret_ref:
             raise ValueError("secret_ref is required for external secret providers.")
         return self
 
@@ -370,7 +398,17 @@ class ServerUpdate(BaseModel):
 
 class AppConfig(BaseModel):
     timeout_seconds: float = 2.0
+    probe_timeout_seconds: float = 1.5
     port_check_retries: int = 2
+    max_concurrency: int = 200
+    batch_size: int = 250
+    retry_backoff_base_ms: int = 120
+    retry_backoff_max_ms: int = 1500
+    flaky_threshold_percent: float = 100.0
+    status_priority_overrides: dict[str, int] = Field(default_factory=dict)
+    history_enabled: bool = True
+    history_retention_days: int = 30
+    default_page_size: int = 200
     servers: list[ServerTarget] = Field(default_factory=list)
     templates: list[TargetTemplate] = Field(default_factory=list)
     credential_profiles: list[CredentialProfile] = Field(default_factory=list)
@@ -390,6 +428,95 @@ class AppConfig(BaseModel):
         if value < 0 or value > 5:
             raise ValueError("port_check_retries must be between 0 and 5")
         return value
+
+    @field_validator("probe_timeout_seconds")
+    @classmethod
+    def validate_probe_timeout(cls, value: float) -> float:
+        value = float(value)
+        if value <= 0 or value > 10:
+            raise ValueError("probe_timeout_seconds must be between 0 and 10")
+        return round(value, 3)
+
+    @field_validator("max_concurrency")
+    @classmethod
+    def validate_max_concurrency(cls, value: int) -> int:
+        value = int(value)
+        if value < 1 or value > 5000:
+            raise ValueError("max_concurrency must be between 1 and 5000")
+        return value
+
+    @field_validator("batch_size")
+    @classmethod
+    def validate_batch_size(cls, value: int) -> int:
+        value = int(value)
+        if value < 1 or value > 10000:
+            raise ValueError("batch_size must be between 1 and 10000")
+        return value
+
+    @field_validator("retry_backoff_base_ms")
+    @classmethod
+    def validate_backoff_base(cls, value: int) -> int:
+        value = int(value)
+        if value < 0 or value > 5000:
+            raise ValueError("retry_backoff_base_ms must be between 0 and 5000")
+        return value
+
+    @field_validator("retry_backoff_max_ms")
+    @classmethod
+    def validate_backoff_max(cls, value: int) -> int:
+        value = int(value)
+        if value < 0 or value > 30000:
+            raise ValueError("retry_backoff_max_ms must be between 0 and 30000")
+        return value
+
+    @field_validator("flaky_threshold_percent")
+    @classmethod
+    def validate_flaky_threshold(cls, value: float) -> float:
+        value = float(value)
+        if value < 50 or value > 100:
+            raise ValueError("flaky_threshold_percent must be between 50 and 100")
+        return round(value, 2)
+
+    @field_validator("status_priority_overrides")
+    @classmethod
+    def validate_status_priority_overrides(cls, value: dict[str, int]) -> dict[str, int]:
+        normalized: dict[str, int] = {}
+        for key, raw in value.items():
+            name = str(key).strip().upper()
+            if not name:
+                continue
+            weight = int(raw)
+            if weight < 0 or weight > 10000:
+                raise ValueError(f"status priority out of range for {name}: {weight}")
+            normalized[name] = weight
+        return normalized
+
+    @field_validator("history_retention_days")
+    @classmethod
+    def validate_history_retention_days(cls, value: int) -> int:
+        value = int(value)
+        if value < 1 or value > 3650:
+            raise ValueError("history_retention_days must be between 1 and 3650")
+        return value
+
+    @field_validator("default_page_size")
+    @classmethod
+    def validate_default_page_size(cls, value: int) -> int:
+        value = int(value)
+        if value < 20 or value > 1000:
+            raise ValueError("default_page_size must be between 20 and 1000")
+        return value
+
+    @model_validator(mode="after")
+    def validate_cross_fields(self) -> "AppConfig":
+        if self.probe_timeout_seconds > self.timeout_seconds:
+            raise ValueError("probe_timeout_seconds cannot exceed timeout_seconds")
+        if self.retry_backoff_max_ms < self.retry_backoff_base_ms:
+            raise ValueError("retry_backoff_max_ms must be >= retry_backoff_base_ms")
+        if self.batch_size < self.max_concurrency:
+            # Keep batch big enough to avoid starving configured concurrency.
+            self.batch_size = self.max_concurrency
+        return self
 
 
 PortStatus = Literal[

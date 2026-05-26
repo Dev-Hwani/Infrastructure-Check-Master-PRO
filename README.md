@@ -208,3 +208,41 @@ http://localhost:8000
 - 가상 스크롤과 서버사이드 페이징 병행(초대형 데이터셋)
 - DNS 추가 타입(NS/CNAME/PTR/CAA) 파싱 확장
 - 자격증명 저장소 플러그인 확장(AWS Secrets Manager / HashiCorp Vault)
+
+## 9) Advanced Features (2026-05 Update)
+
+### 9.1 DNS parser v2
+- Parse all DNS sections: `Answer`, `Authority`, `Additional`
+- Parse `OPT(EDNS0)` metadata (`udp_payload_size`, `edns_version`, `extended_rcode`, options)
+- Handle `TC`(truncated) bit and retry over TCP automatically
+- Keep raw probe artifacts for replay/debug (`raw_query_hex`, `raw_response_hex`)
+
+### 9.2 Probe policy hardening
+- Adaptive retry/backoff by `reason_code` and status category
+- Separate `probe_timeout_seconds` from transport timeout
+- Weighted final status decision with overridable priority map
+- Configurable flakiness threshold (`flaky_threshold_percent`)
+
+### 9.3 Large-scale execution stability
+- Concurrency control via `max_concurrency` semaphore
+- Batch execution via `batch_size`
+- Progress streaming endpoint (SSE): `GET /api/check/stream`
+- Server-side latest result pagination/filter endpoint:
+  `GET /api/check/results?page=&page_size=&status=&transport=&keyword=`
+
+### 9.4 KMS/Secret provider expansion
+- Providers: `dpapi`, `env`, `azure_key_vault`, `aws_secrets_manager`, `hashicorp_vault`
+- Examples:
+  - `env:MY_SECRET`
+  - `azurekv:https://<vault>.vault.azure.net/secrets/<name>`
+  - `aws-sm:ap-northeast-2|my/secret#password`
+  - `vault:https://vault.company.local|secret/data/app#password`
+
+### 9.5 Operational visibility
+- SQLite history persistence (default path): `data/history.sqlite3`
+- Endpoints:
+  - `GET /api/history/runs`
+  - `GET /api/history/runs/{run_id}`
+  - `GET /api/history/runs/{run_id}/results`
+  - `GET /api/history/trends?days=14`
+- Stores per-run summary, per-target result rows, attempt logs, probe metadata for failure replay

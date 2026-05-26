@@ -3,3 +3,5 @@ __pycache__/
 .venv/
 venv/
 *.xlsx
+data/*.sqlite3
+data/*.db
