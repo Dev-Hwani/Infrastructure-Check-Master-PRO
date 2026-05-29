@@ -1,9 +1,9 @@
-﻿<!doctype html>
+<!doctype html>
 <html lang="ko">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>?명봽??泥댄겕 留덉뒪??PRO</title>
+    <title>인프라 체크 마스터 PRO</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -16,7 +16,7 @@
       integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH"
       crossorigin="anonymous"
     />
-    <link rel="stylesheet" href="/static/styles.css?v=20260527-5" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260529-encoding1" />
   </head>
   <body>
     <div class="bg-layer" aria-hidden="true"></div>
@@ -26,18 +26,16 @@
       <section class="hero-panel mb-4">
         <div class="hero-text">
           <p class="eyebrow">ASYNC INFRA CHECK PLATFORM</p>
-          <h1>?명봽??泥댄겕 留덉뒪??PRO</h1>
-          <p class="subtext">
-            ?ㅼ닔 ?쒕쾭 ?먭? | ?ы듃/?쒕퉬???먭꺽 由ъ냼???곹깭 ?뺤씤.
-          </p>
-          <p id="lastChecked" class="last-checked mb-0">理쒓렐 ?먭?: ?놁쓬</p>
+          <h1>인프라 체크 마스터 PRO</h1>
+          <p class="subtext">다수 서버 동시 점검 | 포트/서비스/원격 리소스 상태 확인</p>
+          <p id="lastChecked" class="last-checked mb-0">최근 점검: 없음</p>
         </div>
         <div class="hero-actions">
           <button id="checkBtn" class="btn btn-audit">
             <span id="checkSpinner" class="spinner-border spinner-border-sm me-2 d-none"></span>
-            醫낇빀 ?먭? ?쒖옉
+            종합 점검 시작
           </button>
-          <button id="downloadBtn" type="button" class="btn btn-ghost">?묒? 由ы룷???ㅼ슫濡쒕뱶</button>
+          <button id="downloadBtn" type="button" class="btn btn-ghost">엑셀 리포트 다운로드</button>
         </div>
         <div id="checkProgressWrap" class="mt-3 d-none">
           <div class="progress" style="height: 10px">
@@ -51,16 +49,16 @@
               aria-valuenow="0"
             ></div>
           </div>
-          <p id="checkProgressText" class="panel-note mt-2 mb-0">Progress 0%</p>
+          <p id="checkProgressText" class="panel-note mt-2 mb-0">진행률 0%</p>
         </div>
       </section>
 
       <section class="guide-strip mb-3">
-        <p class="guide-title">鍮좊Ⅸ ?ъ슜 ?쒖꽌</p>
+        <p class="guide-title">빠른 사용 순서</p>
         <div class="guide-items">
-          <span>1. ?ㅼ젙 愿由ъ뿉???쒕쾭 ?깅줉</span>
-          <span>2. 醫낇빀 ?먭? ?쒖옉</span>
-          <span>3. ?곹깭 ?뺤씤 ??由ы룷???ㅼ슫濡쒕뱶</span>
+          <span>1. 설정 관리에서 서버 등록</span>
+          <span>2. 종합 점검 시작</span>
+          <span>3. 결과 확인 후 리포트 다운로드</span>
         </div>
       </section>
 
@@ -74,7 +72,8 @@
             type="button"
             role="tab"
           >
-            ??쒕낫??          </button>
+            대시보드
+          </button>
         </li>
         <li class="nav-item" role="presentation">
           <button
@@ -85,7 +84,8 @@
             type="button"
             role="tab"
           >
-            ?ㅼ젙 愿由?          </button>
+            설정 관리
+          </button>
         </li>
       </ul>
 
@@ -112,7 +112,7 @@
             </div>
             <div class="col-12 col-md-6 col-lg-3">
               <article class="metric-card">
-                <p class="metric-label">珥??먭? ??/p>
+                <p class="metric-label">총 점검 수</p>
                 <p class="metric-value" id="totalChecksMetric">-</p>
               </article>
             </div>
@@ -129,48 +129,48 @@
 
           <article class="panel mb-3">
             <div class="panel-title-wrap">
-              <h2>History Trends</h2>
-              <button id="trendRefreshBtn" class="btn btn-sm btn-outline-info" type="button">Refresh</button>
+              <h2>점검 이력 추세</h2>
+              <button id="trendRefreshBtn" class="btn btn-sm btn-outline-info" type="button">새로고침</button>
             </div>
             <div class="table-responsive">
               <table class="table table-sm align-middle mb-0">
                 <thead>
                   <tr>
-                    <th>Date (UTC)</th>
-                    <th>Runs</th>
-                    <th>Total Checks</th>
-                    <th>Flaky Ratio</th>
-                    <th>Error Ratio</th>
+                    <th>날짜(UTC)</th>
+                    <th>실행 횟수</th>
+                    <th>총 점검 수</th>
+                    <th>Flaky 비율</th>
+                    <th>Error 비율</th>
                   </tr>
                 </thead>
                 <tbody id="trendBody">
                   <tr>
-                    <td colspan="5" class="text-muted py-3">Waiting for trend data</td>
+                    <td colspan="5" class="text-muted py-3">추세 데이터를 기다리는 중입니다.</td>
                   </tr>
                 </tbody>
               </table>
             </div>
-            <p id="trendAlertText" class="panel-note mt-2 mb-0">No alerts</p>
+            <p id="trendAlertText" class="panel-note mt-2 mb-0">알림 없음</p>
           </article>
 
           <article class="panel mb-3">
             <div class="panel-title-wrap">
-              <h2>?먭꺽 Hyper-V 由ъ냼??/h2>
+              <h2>원격 Hyper-V 리소스</h2>
             </div>
             <div class="table-responsive">
               <table class="table table-sm align-middle mb-0">
                 <thead>
                   <tr>
-                    <th>?쒕쾭</th>
-                    <th>?몄뒪??/th>
+                    <th>서버</th>
+                    <th>호스트</th>
                     <th>CPU</th>
-                    <th>硫붾え由?/th>
-                    <th>?곹깭</th>
+                    <th>메모리</th>
+                    <th>상태</th>
                   </tr>
                 </thead>
                 <tbody id="remoteMetricsBody">
                   <tr>
-                    <td colspan="5" class="text-muted py-3">?꾩쭅 ?섏쭛???먭꺽 由ъ냼???곗씠?곌? ?놁뒿?덈떎.</td>
+                    <td colspan="5" class="text-muted py-3">아직 수집된 원격 리소스 데이터가 없습니다.</td>
                   </tr>
                 </tbody>
               </table>
@@ -179,22 +179,22 @@
 
           <article class="panel mb-3">
             <div class="panel-title-wrap">
-              <h2>Windows ?쒕퉬???곹깭</h2>
+              <h2>Windows 서비스 상태</h2>
             </div>
             <div class="table-responsive">
               <table class="table table-sm align-middle mb-0">
                 <thead>
                   <tr>
-                    <th>?쒕쾭</th>
-                    <th>?몄뒪??/th>
-                    <th>?쒕퉬?ㅻ챸</th>
-                    <th>?곹깭</th>
-                    <th>?곸꽭</th>
+                    <th>서버</th>
+                    <th>호스트</th>
+                    <th>서비스명</th>
+                    <th>상태</th>
+                    <th>상세</th>
                   </tr>
                 </thead>
                 <tbody id="serviceResultBody">
                   <tr>
-                    <td colspan="5" class="text-muted py-3">?꾩쭅 ?먭????쒕퉬??寃곌낵媛 ?놁뒿?덈떎.</td>
+                    <td colspan="5" class="text-muted py-3">아직 서비스 점검 결과가 없습니다.</td>
                   </tr>
                 </tbody>
               </table>
@@ -203,17 +203,17 @@
 
           <article class="panel">
             <div class="panel-title-wrap">
-              <h2>?ы듃 ?먭? 寃곌낵</h2>
-              <p class="panel-note mb-0" id="summaryText">?먭? ?湲?以?/p>
+              <h2>포트 점검 결과</h2>
+              <p class="panel-note mb-0" id="summaryText">점검 대기 중</p>
             </div>
             <div class="result-filter-wrap mb-2">
               <input
                 id="resultSearchInput"
                 class="form-control form-control-sm"
-                placeholder="寃?? ?쒕쾭紐?/ ?몄뒪??/ reason_code"
+                placeholder="검색: 서버명 / 호스트 / reason_code"
               />
               <select id="resultStatusFilter" class="form-select form-select-sm">
-                <option value="ALL">紐⑤뱺 ?곹깭</option>
+                <option value="ALL">모든 상태</option>
                 <option value="OPEN">OPEN</option>
                 <option value="REFUSED">REFUSED</option>
                 <option value="TIMEOUT">TIMEOUT</option>
@@ -227,7 +227,7 @@
                 <option value="ERROR">ERROR</option>
               </select>
               <select id="resultTransportFilter" class="form-select form-select-sm">
-                <option value="ALL">紐⑤뱺 Transport</option>
+                <option value="ALL">모든 Transport</option>
                 <option value="tcp">TCP</option>
                 <option value="udp">UDP</option>
               </select>
@@ -241,18 +241,18 @@
               <table class="table table-hover align-middle mb-0">
                 <thead>
                   <tr>
-                    <th>?쒕쾭紐?/th>
+                    <th>서버명</th>
                     <th>IP/Host</th>
                     <th>Port</th>
-                    <th>?곹깭</th>
-                    <th>吏??ms)</th>
-                    <th>?곸꽭</th>
-                    <th>議곗튂 媛?대뱶</th>
+                    <th>상태</th>
+                    <th>지연(ms)</th>
+                    <th>상세</th>
+                    <th>조치 가이드</th>
                   </tr>
                 </thead>
                 <tbody id="resultBody">
                   <tr>
-                    <td colspan="7" class="text-muted py-3">[醫낇빀 ?먭? ?쒖옉] 踰꾪듉???대┃?섏꽭??</td>
+                    <td colspan="7" class="text-muted py-3">[종합 점검 시작] 버튼을 클릭해 주세요.</td>
                   </tr>
                 </tbody>
               </table>
@@ -263,36 +263,36 @@
         <section class="tab-pane fade" id="settings-pane" role="tabpanel">
           <article class="panel mb-3">
             <div class="panel-title-wrap">
-              <h2>?먭? ????쒕쾭 ?깅줉/?섏젙</h2>
+              <h2>점검 대상 서버 등록/수정</h2>
             </div>
             <form id="serverForm" class="row g-3">
               <input id="editingServerId" type="hidden" />
               <div class="col-12 col-md-3">
-                <label for="serverName" class="form-label">?쒕쾭紐?/label>
-                <input id="serverName" class="form-control" placeholder="?? APP-01" required />
+                <label for="serverName" class="form-label">서버명</label>
+                <input id="serverName" class="form-control" placeholder="예: APP-01" required />
               </div>
               <div class="col-12 col-md-3">
-                <label for="serverHost" class="form-label">IP ?먮뒗 Host</label>
-                <input id="serverHost" class="form-control" placeholder="?? 192.168.0.120" required />
+                <label for="serverHost" class="form-label">IP 또는 Host</label>
+                <input id="serverHost" class="form-control" placeholder="예: 192.168.0.120" required />
               </div>
               <div class="col-12 col-md-3">
-                <label for="serverPorts" class="form-label">?ы듃 紐⑸줉 (肄ㅻ쭏 援щ텇)</label>
-                <input id="serverPorts" class="form-control" placeholder="80,443,3389 (湲곕낯 TCP)" />
+                <label for="serverPorts" class="form-label">포트 목록 (콤마 구분)</label>
+                <input id="serverPorts" class="form-control" placeholder="80,443,3389 (기본 TCP)" />
               </div>
               <div class="col-12 col-md-3">
-                <label for="serverCredentialProfile" class="form-label">?먭꺽利앸챸 ?꾨줈?뚯씪</label>
+                <label for="serverCredentialProfile" class="form-label">원격 인증 프로필</label>
                 <select id="serverCredentialProfile" class="form-select">
-                  <option value="">?꾩옱 ?ㅽ뻾 怨꾩젙</option>
+                  <option value="">현재 실행 계정</option>
                 </select>
               </div>
               <div class="col-12">
                 <div class="advanced-target-box">
                   <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
-                    <p class="advanced-title mb-0">怨좉툒 ?ы듃 ?源?(Transport / Probe / Retries)</p>
+                    <p class="advanced-title mb-0">고급 포트 타깃 (Transport / Probe / Retries)</p>
                     <div class="d-flex gap-2">
-                      <button id="tplAdBtn" type="button" class="btn btn-sm btn-outline-info">AD ?쒗뵆由?/button>
-                      <button id="tplWebBtn" type="button" class="btn btn-sm btn-outline-info">WEB ?쒗뵆由?/button>
-                      <button id="tplDbBtn" type="button" class="btn btn-sm btn-outline-info">DB ?쒗뵆由?/button>
+                      <button id="tplAdBtn" type="button" class="btn btn-sm btn-outline-info">AD 템플릿</button>
+                      <button id="tplWebBtn" type="button" class="btn btn-sm btn-outline-info">WEB 템플릿</button>
+                      <button id="tplDbBtn" type="button" class="btn btn-sm btn-outline-info">DB 템플릿</button>
                     </div>
                   </div>
                   <div class="row g-2 align-items-end">
@@ -329,12 +329,10 @@
                       <input id="advancedRetries" type="number" min="0" max="5" class="form-control" value="2" />
                     </div>
                     <div class="col-12 col-md-1 d-grid">
-                      <button id="addPortTargetBtn" type="button" class="btn btn-ghost">異붽?</button>
+                      <button id="addPortTargetBtn" type="button" class="btn btn-ghost">추가</button>
                     </div>
                   </div>
-                  <p class="panel-note mt-2 mb-2">
-                    湲곕낯 ?ы듃 紐⑸줉 ?놁씠??怨좉툒 ?源껊쭔?쇰줈 ?먭??????덉뒿?덈떎.
-                  </p>
+                  <p class="panel-note mt-2 mb-2">기본 포트 목록 없이도 고급 타깃만으로 점검할 수 있습니다.</p>
                   <div class="table-responsive">
                     <table class="table table-sm align-middle mb-0">
                       <thead>
@@ -343,47 +341,47 @@
                           <th>Transport</th>
                           <th>Probe</th>
                           <th>Retries</th>
-                          <th>?섏젙</th>
-                          <th>??젣</th>
+                          <th>수정</th>
+                          <th>삭제</th>
                         </tr>
                       </thead>
                       <tbody id="portTargetBody">
                         <tr>
-                          <td colspan="6" class="text-muted py-2">怨좉툒 ?源껋씠 ?놁뒿?덈떎.</td>
+                          <td colspan="6" class="text-muted py-2">고급 타깃이 없습니다.</td>
                         </tr>
                       </tbody>
                     </table>
                   </div>
                   <hr class="my-3" />
-                  <p class="advanced-title mb-2">議곗쭅 ?쒗뵆由????愿由?/p>
+                  <p class="advanced-title mb-2">조직 템플릿 저장/관리</p>
                   <input id="editingTemplateId" type="hidden" />
                   <div class="row g-2 align-items-end">
                     <div class="col-12 col-md-3">
-                      <label for="templateName" class="form-label">?쒗뵆由용챸</label>
-                      <input id="templateName" class="form-control" placeholder="?? HQ-AD-Baseline" />
+                      <label for="templateName" class="form-label">템플릿명</label>
+                      <input id="templateName" class="form-control" placeholder="예: HQ-AD-Baseline" />
                     </div>
                     <div class="col-12 col-md-5">
-                      <label for="templateDescription" class="form-label">?ㅻ챸</label>
-                      <input id="templateDescription" class="form-control" placeholder="?? 蹂몄궗 AD ?먭? ?쒖? ?쒗뵆由? />
+                      <label for="templateDescription" class="form-label">설명</label>
+                      <input id="templateDescription" class="form-control" placeholder="예: 본사 AD 점검 표준 템플릿" />
                     </div>
                     <div class="col-12 col-md-4 d-flex gap-2">
-                      <button id="saveTemplateBtn" type="button" class="btn btn-sm btn-outline-info">?쒗뵆由????/button>
-                      <button id="resetTemplateFormBtn" type="button" class="btn btn-sm btn-outline-secondary">珥덇린??/button>
+                      <button id="saveTemplateBtn" type="button" class="btn btn-sm btn-outline-info">템플릿 저장</button>
+                      <button id="resetTemplateFormBtn" type="button" class="btn btn-sm btn-outline-secondary">초기화</button>
                     </div>
                   </div>
                   <div class="table-responsive mt-2">
                     <table class="table table-sm align-middle mb-0">
                       <thead>
                         <tr>
-                          <th>?쒗뵆由용챸</th>
-                          <th>?ㅻ챸</th>
-                          <th>?源???/th>
-                          <th>?묒뾽</th>
+                          <th>템플릿명</th>
+                          <th>설명</th>
+                          <th>타깃 수</th>
+                          <th>작업</th>
                         </tr>
                       </thead>
                       <tbody id="templateListBody">
                         <tr>
-                          <td colspan="4" class="text-muted py-2">??λ맂 ?ъ슜???쒗뵆由우씠 ?놁뒿?덈떎.</td>
+                          <td colspan="4" class="text-muted py-2">저장된 사용자 템플릿이 없습니다.</td>
                         </tr>
                       </tbody>
                     </table>
@@ -391,46 +389,42 @@
                 </div>
               </div>
               <div class="col-12">
-                <label for="serverServices" class="form-label">
-                  Windows ?쒕퉬??紐⑸줉 (肄ㅻ쭏 援щ텇, ?좏깮)
-                </label>
+                <label for="serverServices" class="form-label">Windows 서비스 목록 (콤마 구분, 선택)</label>
                 <input id="serverServices" class="form-control" placeholder="W3SVC,Spooler" />
               </div>
               <div class="col-12">
                 <div class="form-check">
                   <input class="form-check-input" type="checkbox" id="remoteMetricsEnabled" checked />
-                  <label class="form-check-label" for="remoteMetricsEnabled">
-                    ?먭꺽 由ъ냼??紐⑤땲?곕쭅 ??곸뿉 ?ы븿
-                  </label>
+                  <label class="form-check-label" for="remoteMetricsEnabled">원격 리소스 모니터링 대상에 포함</label>
                 </div>
               </div>
               <div class="col-12 d-flex gap-2">
-                <button type="submit" class="btn btn-audit">???/button>
-                <button id="resetFormBtn" type="button" class="btn btn-outline-secondary">?낅젰 珥덇린??/button>
+                <button type="submit" class="btn btn-audit">저장</button>
+                <button id="resetFormBtn" type="button" class="btn btn-outline-secondary">입력 초기화</button>
               </div>
             </form>
           </article>
 
           <article class="panel">
             <div class="panel-title-wrap">
-              <h2>?깅줉???먭? ???/h2>
+              <h2>등록된 점검 대상</h2>
             </div>
             <div class="table-responsive">
               <table class="table align-middle mb-0">
                 <thead>
                   <tr>
-                    <th>?쒕쾭紐?/th>
-                    <th>?몄뒪??/th>
-                    <th>?ы듃</th>
-                    <th>怨좉툒 ?源?/th>
-                    <th>?쒕퉬??/th>
-                    <th>?먭꺽 紐⑤땲?곕쭅</th>
-                    <th>?묒뾽</th>
+                    <th>서버명</th>
+                    <th>호스트</th>
+                    <th>포트</th>
+                    <th>고급 타깃</th>
+                    <th>서비스</th>
+                    <th>원격 모니터링</th>
+                    <th>작업</th>
                   </tr>
                 </thead>
                 <tbody id="serverListBody">
                   <tr>
-                    <td colspan="7" class="text-muted py-3">遺덈윭?ㅻ뒗 以?..</td>
+                    <td colspan="7" class="text-muted py-3">불러오는 중...</td>
                   </tr>
                 </tbody>
               </table>
@@ -439,64 +433,64 @@
 
           <article class="panel mt-3">
             <div class="panel-title-wrap">
-              <h2>?먭꺽 ?먭? ?먭꺽利앸챸 ?꾨줈?뚯씪</h2>
-              <p class="panel-note mb-0">?쒕쾭蹂꾨줈 ?곌껐 怨꾩젙??遺꾨━???먭꺽 由ъ냼???쒕퉬???먭? ?깃났瑜좎쓣 ?믪엯?덈떎.</p>
+              <h2>원격 점검 인증 프로필</h2>
+              <p class="panel-note mb-0">서버별 연결 계정을 분리해 원격 리소스/서비스 점검 성공률을 높입니다.</p>
             </div>
             <form id="credentialProfileForm" class="row g-2 mb-2">
               <input id="editingCredentialProfileId" type="hidden" />
               <div class="col-12 col-md-2">
-                <label for="credentialProfileName" class="form-label">?꾨줈?뚯씪紐?/label>
-                <input id="credentialProfileName" class="form-control" placeholder="?? AD-Admin" />
+                <label for="credentialProfileName" class="form-label">프로필명</label>
+                <input id="credentialProfileName" class="form-control" placeholder="예: AD-Admin" />
               </div>
               <div class="col-12 col-md-3">
-                <label for="credentialProfileUsername" class="form-label">?ъ슜?먮챸</label>
-                <input id="credentialProfileUsername" class="form-control" placeholder="?? administrator" />
+                <label for="credentialProfileUsername" class="form-label">사용자명</label>
+                <input id="credentialProfileUsername" class="form-control" placeholder="예: administrator" />
               </div>
               <div class="col-12 col-md-2">
                 <label for="credentialProfileProvider" class="form-label">Secret Provider</label>
                 <select id="credentialProfileProvider" class="form-select">
-                  <option value="dpapi">dpapi (濡쒖뺄 ?뷀샇?????</option>
-                  <option value="env">env (?섍꼍蹂??李몄“)</option>
+                  <option value="dpapi">dpapi (로컬 암호화 저장)</option>
+                  <option value="env">env (환경변수 참조)</option>
                   <option value="azure_key_vault">azure_key_vault (KMS)</option>
                   <option value="aws_secrets_manager">aws_secrets_manager (KMS)</option>
                   <option value="hashicorp_vault">hashicorp_vault (KMS)</option>
                 </select>
               </div>
               <div class="col-12 col-md-2">
-                <label for="credentialProfileDomain" class="form-label">?꾨찓???좏깮)</label>
-                <input id="credentialProfileDomain" class="form-control" placeholder="?? CORP" />
+                <label for="credentialProfileDomain" class="form-label">도메인(선택)</label>
+                <input id="credentialProfileDomain" class="form-control" placeholder="예: CORP" />
               </div>
               <div class="col-12 col-md-3">
-                <label for="credentialProfilePassword" class="form-label">鍮꾨?踰덊샇(dpapi??</label>
-                <input id="credentialProfilePassword" type="password" class="form-control" placeholder="?섏젙 ??鍮꾩썙?먮㈃ 湲곗〈 ?뷀샇 ?좎?" />
+                <label for="credentialProfilePassword" class="form-label">비밀번호(dpapi용)</label>
+                <input id="credentialProfilePassword" type="password" class="form-control" placeholder="수정 시 비워두면 기존 암호 유지" />
               </div>
               <div class="col-12 col-md-2">
                 <label for="credentialProfileSecretRef" class="form-label">Secret Ref</label>
                 <input id="credentialProfileSecretRef" class="form-control" placeholder="env:VAR / azurekv:https://... / aws-sm:region|secret#key / vault:https://addr|path#key" />
               </div>
               <div class="col-12 col-md-2">
-                <label for="credentialProfileDescription" class="form-label">?ㅻ챸</label>
-                <input id="credentialProfileDescription" class="form-control" placeholder="?? AD ?댁쁺怨꾩젙" />
+                <label for="credentialProfileDescription" class="form-label">설명</label>
+                <input id="credentialProfileDescription" class="form-control" placeholder="예: AD 운영계정" />
               </div>
               <div class="col-12 d-flex gap-2">
-                <button type="submit" class="btn btn-sm btn-outline-info">?꾨줈?뚯씪 ???/button>
-                <button id="resetCredentialProfileFormBtn" type="button" class="btn btn-sm btn-outline-secondary">珥덇린??/button>
+                <button type="submit" class="btn btn-sm btn-outline-info">프로필 저장</button>
+                <button id="resetCredentialProfileFormBtn" type="button" class="btn btn-sm btn-outline-secondary">초기화</button>
               </div>
             </form>
             <div class="table-responsive">
               <table class="table table-sm align-middle mb-0">
                 <thead>
                   <tr>
-                    <th>?꾨줈?뚯씪紐?/th>
-                    <th>怨꾩젙</th>
+                    <th>프로필명</th>
+                    <th>계정</th>
                     <th>Provider</th>
-                    <th>?ㅻ챸</th>
-                    <th>?묒뾽</th>
+                    <th>설명</th>
+                    <th>작업</th>
                   </tr>
                 </thead>
                 <tbody id="credentialProfileListBody">
                   <tr>
-                    <td colspan="5" class="text-muted py-2">?깅줉???꾨줈?뚯씪???놁뒿?덈떎.</td>
+                    <td colspan="5" class="text-muted py-2">등록된 프로필이 없습니다.</td>
                   </tr>
                 </tbody>
               </table>
@@ -511,7 +505,6 @@
       integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz"
       crossorigin="anonymous"
     ></script>
-    <script src="/static/app.js?v=20260527-5"></script>
+    <script src="/static/app.js?v=20260529-encoding1"></script>
   </body>
 </html>
-

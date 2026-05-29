@@ -337,13 +337,13 @@ function setDraftTargetEditMode(index) {
   const isEditing =
     Number.isInteger(index) && index >= 0 && index < state.draftPortTargets.length;
   state.editingDraftTargetIndex = isEditing ? index : null;
-  button.textContent = isEditing ? "Update" : "Add";
+  button.textContent = isEditing ? "수정" : "추가";
 }
 
 function renderDraftPortTargets() {
   const tbody = document.getElementById("portTargetBody");
   if (!state.draftPortTargets.length) {
-    tbody.innerHTML = '<tr><td colspan="6" class="text-muted py-2">怨좉툒 ?源껋씠 ?놁뒿?덈떎.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="6" class="text-muted py-2">고급 타깃이 없습니다.</td></tr>';
     return;
   }
 
@@ -351,7 +351,7 @@ function renderDraftPortTargets() {
     .map((target, index) => {
       const isEditing = state.editingDraftTargetIndex === index;
       const editBtnClass = isEditing ? "btn-warning" : "btn-outline-info";
-      const editBtnText = isEditing ? "Editing" : "Edit";
+      const editBtnText = isEditing ? "수정중" : "수정";
       return `
         <tr>
           <td>${target.port}</td>
@@ -365,7 +365,7 @@ function renderDraftPortTargets() {
           </td>
           <td>
             <button class="btn btn-sm btn-outline-danger" data-action="remove-target" data-index="${index}">
-              ??젣
+              삭제
             </button>
           </td>
         </tr>
@@ -400,9 +400,9 @@ function upsertDraftPortTargetFromForm() {
   if (!target) {
     notify({
       type: "warning",
-      title: "怨좉툒 ?源??낅젰媛??ㅻ쪟",
+      title: "고급 타깃 입력 오류",
       message:
-        "Port(1~65535), Transport/Probe 議고빀, Retries(0~5)瑜??뺤씤??二쇱꽭?? TCP? UDP??吏??probe媛 ?ㅻ쫭?덈떎.",
+        "Port(1~65535), Transport/Probe 조합, Retries(0~5)를 확인해 주세요. TCP와 UDP는 지원 probe가 다릅니다.",
       timeout: 4800,
     });
     return;
@@ -416,8 +416,8 @@ function upsertDraftPortTargetFromForm() {
     resetAdvancedPortTargetInputs();
     notify({
       type: "success",
-      title: "怨좉툒 ?源??섏젙 ?꾨즺",
-      message: `${target.port}/${target.transport}/${target.probe} ??ぉ???섏젙?덉뒿?덈떎.`,
+      title: "고급 타깃 수정 완료",
+      message: `${target.port}/${target.transport}/${target.probe} 항목을 수정했습니다.`,
     });
     return;
   }
@@ -427,7 +427,7 @@ function upsertDraftPortTargetFromForm() {
   resetAdvancedPortTargetInputs();
   notify({
     type: "success",
-    title: "怨좉툒 ?源?異붽?",
+    title: "고급 타깃 추가",
     message: `${target.port}/${target.transport}/${target.probe} (retries=${target.retries})`,
   });
 }
@@ -448,8 +448,8 @@ function removeDraftPortTarget(index) {
   renderDraftPortTargets();
   notify({
     type: "info",
-    title: "怨좉툒 ?源???젣",
-    message: `${removed.port}/${removed.transport}/${removed.probe} ??ぉ????젣?덉뒿?덈떎.`,
+    title: "고급 타깃 삭제",
+    message: `${removed.port}/${removed.transport}/${removed.probe} 항목을 삭제했습니다.`,
   });
 }
 
@@ -487,13 +487,13 @@ function resetTemplateForm() {
   document.getElementById("editingTemplateId").value = "";
   document.getElementById("templateName").value = "";
   document.getElementById("templateDescription").value = "";
-  document.getElementById("saveTemplateBtn").textContent = "Save Template";
+  document.getElementById("saveTemplateBtn").textContent = "템플릿 저장";
 }
 
 function renderTemplateList() {
   const tbody = document.getElementById("templateListBody");
   if (!state.templates.length) {
-    tbody.innerHTML = '<tr><td colspan="4" class="text-muted py-2">??λ맂 ?ъ슜???쒗뵆由우씠 ?놁뒿?덈떎.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="4" class="text-muted py-2">저장된 사용자 템플릿이 없습니다.</td></tr>';
     return;
   }
 
@@ -505,9 +505,9 @@ function renderTemplateList() {
         <td>${template.description || "-"}</td>
         <td>${(template.port_targets || []).length}</td>
         <td class="d-flex gap-1">
-          <button class="btn btn-sm btn-outline-success" data-action="apply-template" data-id="${template.id}">?곸슜</button>
-          <button class="btn btn-sm btn-outline-info" data-action="edit-template" data-id="${template.id}">?섏젙</button>
-          <button class="btn btn-sm btn-outline-danger" data-action="delete-template" data-id="${template.id}">??젣</button>
+          <button class="btn btn-sm btn-outline-success" data-action="apply-template" data-id="${template.id}">적용</button>
+          <button class="btn btn-sm btn-outline-info" data-action="edit-template" data-id="${template.id}">수정</button>
+          <button class="btn btn-sm btn-outline-danger" data-action="delete-template" data-id="${template.id}">삭제</button>
         </td>
       </tr>
     `
@@ -527,8 +527,8 @@ function applyCustomTemplate(template) {
   renderDraftPortTargets();
   notify({
     type: "success",
-    title: "?ъ슜???쒗뵆由??곸슜",
-    message: `${template.name} ?쒗뵆由우뿉??${applied}媛??源껋쓣 諛섏쁺?덉뒿?덈떎.`,
+    title: "사용자 템플릿 적용",
+    message: `${template.name} 템플릿에서 ${applied}개 타깃을 반영했습니다.`,
   });
 }
 
@@ -538,14 +538,14 @@ async function saveTemplateFromDraft() {
   const editingId = document.getElementById("editingTemplateId").value.trim();
 
   if (!name) {
-    notify({ type: "warning", title: "?낅젰媛??뺤씤", message: "?쒗뵆由용챸???낅젰??二쇱꽭??" });
+    notify({ type: "warning", title: "입력값 확인", message: "템플릿명을 입력해 주세요." });
     return;
   }
   if (!state.draftPortTargets.length) {
     notify({
       type: "warning",
-      title: "?源??놁쓬",
-      message: "?꾩옱 怨좉툒 ?源?紐⑸줉??鍮꾩뼱 ?덉뒿?덈떎. ?源껋쓣 異붽???????ν빐 二쇱꽭??",
+      title: "타깃 없음",
+      message: "현재 고급 타깃 목록이 비어 있습니다. 타깃을 추가하거나 불러온 뒤 저장해 주세요.",
     });
     return;
   }
@@ -563,19 +563,19 @@ async function saveTemplateFromDraft() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      notify({ type: "success", title: "?쒗뵆由??섏젙 ?꾨즺", message: `${name} ?쒗뵆由우쓣 ?섏젙?덉뒿?덈떎.` });
+      notify({ type: "success", title: "템플릿 수정 완료", message: `${name} 템플릿을 수정했습니다.` });
     } else {
       await fetchJson("/api/templates", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      notify({ type: "success", title: "?쒗뵆由?????꾨즺", message: `${name} ?쒗뵆由우쓣 ??ν뻽?듬땲??` });
+      notify({ type: "success", title: "템플릿 저장 완료", message: `${name} 템플릿을 저장했습니다.` });
     }
     resetTemplateForm();
     await loadConfig({ silent: true });
   } catch (error) {
-    notify({ type: "error", title: "?쒗뵆由?????ㅽ뙣", message: error.message, timeout: 5200 });
+    notify({ type: "error", title: "템플릿 저장 실패", message: error.message, timeout: 5200 });
   }
 }
 
@@ -598,7 +598,7 @@ async function onTemplateListClick(event) {
     document.getElementById("editingTemplateId").value = template.id;
     document.getElementById("templateName").value = template.name || "";
     document.getElementById("templateDescription").value = template.description || "";
-    document.getElementById("saveTemplateBtn").textContent = "?쒗뵆由??섏젙";
+    document.getElementById("saveTemplateBtn").textContent = "템플릿 수정";
     state.draftPortTargets = (template.port_targets || [])
       .map(normalizeServerPortTarget)
       .filter((item) => item !== null);
@@ -606,22 +606,22 @@ async function onTemplateListClick(event) {
     renderDraftPortTargets();
     notify({
       type: "info",
-      title: "?쒗뵆由??몄쭛 紐⑤뱶",
-      message: `${template.name} ?쒗뵆由??댁슜???쇱뿉 遺덈윭?붿뒿?덈떎.`,
+      title: "템플릿 편집 모드",
+      message: `${template.name} 템플릿 내용을 폼으로 불러왔습니다.`,
     });
     return;
   }
 
   if (action === "delete-template") {
-    const confirmed = window.confirm(`${template.name} ?쒗뵆由우쓣 ??젣?좉퉴??`);
+    const confirmed = window.confirm(`${template.name} 템플릿을 삭제할까요?`);
     if (!confirmed) return;
     try {
       await fetchJson(`/api/templates/${id}`, { method: "DELETE" });
       resetTemplateForm();
       await loadConfig({ silent: true });
-      notify({ type: "success", title: "?쒗뵆由???젣 ?꾨즺", message: `${template.name} ?쒗뵆由우쓣 ??젣?덉뒿?덈떎.` });
+      notify({ type: "success", title: "템플릿 삭제 완료", message: `${template.name} 템플릿을 삭제했습니다.` });
     } catch (error) {
-      notify({ type: "error", title: "?쒗뵆由???젣 ?ㅽ뙣", message: error.message, timeout: 5200 });
+      notify({ type: "error", title: "템플릿 삭제 실패", message: error.message, timeout: 5200 });
     }
   }
 }
@@ -636,7 +636,7 @@ function renderCredentialProfileOptions(selectedValue = "") {
   const select = document.getElementById("serverCredentialProfile");
   const wanted = selectedValue ?? select.value;
   const options = [
-    '<option value="">?꾩옱 ?ㅽ뻾 怨꾩젙</option>',
+    '<option value="">현재 실행 계정</option>',
     ...state.credentialProfiles.map(
       (profile) =>
         `<option value="${profile.id}">${profile.name} (${profileAccountText(profile)})</option>`
@@ -650,7 +650,7 @@ function renderCredentialProfileOptions(selectedValue = "") {
 function renderCredentialProfileList() {
   const tbody = document.getElementById("credentialProfileListBody");
   if (!state.credentialProfiles.length) {
-    tbody.innerHTML = '<tr><td colspan="5" class="text-muted py-2">?깅줉???꾨줈?뚯씪???놁뒿?덈떎.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="5" class="text-muted py-2">등록된 프로필이 없습니다.</td></tr>';
     return;
   }
 
@@ -663,8 +663,8 @@ function renderCredentialProfileList() {
         <td>${profile.secret_provider || "-"}</td>
         <td>${profile.description || "-"}</td>
         <td class="d-flex gap-1">
-          <button class="btn btn-sm btn-outline-info" data-action="edit-profile" data-id="${profile.id}">?섏젙</button>
-          <button class="btn btn-sm btn-outline-danger" data-action="delete-profile" data-id="${profile.id}">??젣</button>
+          <button class="btn btn-sm btn-outline-info" data-action="edit-profile" data-id="${profile.id}">수정</button>
+          <button class="btn btn-sm btn-outline-danger" data-action="delete-profile" data-id="${profile.id}">삭제</button>
         </td>
       </tr>
     `
@@ -709,24 +709,24 @@ async function submitCredentialProfileForm(event) {
   if (!name || !username) {
     notify({
       type: "warning",
-      title: "?낅젰媛??뺤씤",
-      message: "?꾨줈?뚯씪紐? ?ъ슜?먮챸? ?꾩닔?낅땲??",
+      title: "입력값 확인",
+      message: "프로필명과 사용자명은 필수입니다.",
     });
     return;
   }
   if (secretProvider === "dpapi" && !id && !password) {
     notify({
       type: "warning",
-      title: "?낅젰媛??뺤씤",
-      message: "dpapi ?꾨줈?뚯씪 ?앹꽦 ??鍮꾨?踰덊샇???꾩닔?낅땲??",
+      title: "입력값 확인",
+      message: "dpapi 프로필 생성 시 비밀번호는 필수입니다.",
     });
     return;
   }
   if ((secretProvider === "env" || secretProvider === "azure_key_vault") && !secretRef) {
     notify({
       type: "warning",
-      title: "?낅젰媛??뺤씤",
-      message: `${secretProvider} ?꾨줈?뚯씪? Secret Ref媛 ?꾩슂?⑸땲??`,
+      title: "입력값 확인",
+      message: `${secretProvider} 프로필은 Secret Ref가 필요합니다.`,
     });
     return;
   }
@@ -748,14 +748,14 @@ async function submitCredentialProfileForm(event) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      notify({ type: "success", title: "?꾨줈?뚯씪 ?섏젙 ?꾨즺", message: `${name} ?꾨줈?뚯씪???섏젙?덉뒿?덈떎.` });
+      notify({ type: "success", title: "프로필 수정 완료", message: `${name} 프로필을 수정했습니다.` });
     } else {
       await fetchJson("/api/credential-profiles", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      notify({ type: "success", title: "?꾨줈?뚯씪 ????꾨즺", message: `${name} ?꾨줈?뚯씪????ν뻽?듬땲??` });
+      notify({ type: "success", title: "프로필 저장 완료", message: `${name} 프로필을 저장했습니다.` });
     }
 
     resetCredentialProfileForm();
@@ -763,7 +763,7 @@ async function submitCredentialProfileForm(event) {
   } catch (error) {
     notify({
       type: "error",
-      title: "?꾨줈?뚯씪 ????ㅽ뙣",
+      title: "프로필 저장 실패",
       message: error.message,
       timeout: 5200,
     });
@@ -782,20 +782,20 @@ async function onCredentialProfileListClick(event) {
 
   if (action === "edit-profile") {
     fillCredentialProfileForm(profile);
-    notify({ type: "info", title: "?꾨줈?뚯씪 ?몄쭛", message: `${profile.name} ?꾨줈?뚯씪???몄쭛 以묒엯?덈떎.` });
+    notify({ type: "info", title: "프로필 편집", message: `${profile.name} 프로필을 편집 중입니다.` });
     return;
   }
 
   if (action === "delete-profile") {
-    const confirmed = window.confirm(`${profile.name} ?꾨줈?뚯씪????젣?좉퉴??`);
+    const confirmed = window.confirm(`${profile.name} 프로필을 삭제할까요?`);
     if (!confirmed) return;
     try {
       await fetchJson(`/api/credential-profiles/${id}`, { method: "DELETE" });
       resetCredentialProfileForm();
       await loadConfig({ silent: true });
-      notify({ type: "success", title: "?꾨줈?뚯씪 ??젣 ?꾨즺", message: `${profile.name} ?꾨줈?뚯씪????젣?덉뒿?덈떎.` });
+      notify({ type: "success", title: "프로필 삭제 완료", message: `${profile.name} 프로필을 삭제했습니다.` });
     } catch (error) {
-      notify({ type: "error", title: "?꾨줈?뚯씪 ??젣 ?ㅽ뙣", message: error.message, timeout: 5200 });
+      notify({ type: "error", title: "프로필 삭제 실패", message: error.message, timeout: 5200 });
     }
   }
 }
@@ -803,7 +803,7 @@ async function onCredentialProfileListClick(event) {
 function getRecommendedAction(row) {
   if (row.recommended_action) return row.recommended_action;
   if (row.reason_code && reasonCodeGuideMap[row.reason_code]) return reasonCodeGuideMap[row.reason_code];
-  return actionGuideMap[row.status] || "?곸꽭 濡쒓렇瑜??뺤씤??異붽? ?먭???二쇱꽭??";
+  return actionGuideMap[row.status] || "상세 로그를 확인해 추가 점검을 진행해 주세요.";
 }
 
 function formatProbeInfo(item) {
@@ -895,7 +895,7 @@ function updateStatusChips(payload) {
 function renderRemoteMetrics(remoteMetrics) {
   const tbody = document.getElementById("remoteMetricsBody");
   if (!Array.isArray(remoteMetrics) || remoteMetrics.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="5" class="text-muted py-3">?꾩쭅 ?섏쭛???먭꺽 由ъ냼???곗씠?곌? ?놁뒿?덈떎.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="5" class="text-muted py-3">아직 수집된 원격 리소스 데이터가 없습니다.</td></tr>';
     return;
   }
 
@@ -904,9 +904,9 @@ function renderRemoteMetrics(remoteMetrics) {
       const ok = item.status === "OK";
       const cpu = ok ? `${item.cpu_percent}%` : "-";
       const mem = ok ? `${item.memory_percent}%` : "-";
-      const detailParts = [ok ? "?뺤긽" : item.detail || "?ㅻ쪟"];
-      if (item.credential_profile) detailParts.push(`怨꾩젙: ${item.credential_profile}`);
-      if (item.credential_source) detailParts.push(`?뚯뒪: ${item.credential_source}`);
+      const detailParts = [ok ? "정상" : item.detail || "오류"];
+      if (item.credential_profile) detailParts.push(`계정: ${item.credential_profile}`);
+      if (item.credential_source) detailParts.push(`소스: ${item.credential_source}`);
       const detail = detailParts.join(" | ");
       const badgeClass = ok ? "text-bg-success" : "text-bg-danger";
       return `
@@ -925,7 +925,7 @@ function renderRemoteMetrics(remoteMetrics) {
 function renderServiceResults(serviceChecks) {
   const tbody = document.getElementById("serviceResultBody");
   if (!serviceChecks || !Array.isArray(serviceChecks.results) || serviceChecks.results.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="5" class="text-muted py-3">?쒕퉬???먭? ??곸씠 ?놁뒿?덈떎.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="5" class="text-muted py-3">서비스 점검 대상이 없습니다.</td></tr>';
     return;
   }
 
@@ -937,8 +937,8 @@ function renderServiceResults(serviceChecks) {
       if (item.status === "NOT_FOUND") badgeClass = "text-bg-warning";
       if (item.status === "ERROR") badgeClass = "text-bg-dark";
       const detailParts = [item.detail || "-"];
-      if (item.credential_profile) detailParts.push(`怨꾩젙: ${item.credential_profile}`);
-      if (item.credential_source) detailParts.push(`?뚯뒪: ${item.credential_source}`);
+      if (item.credential_profile) detailParts.push(`계정: ${item.credential_profile}`);
+      if (item.credential_source) detailParts.push(`소스: ${item.credential_source}`);
       return `
         <tr>
           <td>${item.server_name}</td>
@@ -1050,8 +1050,8 @@ function renderVirtualResultRows() {
   if (total === 0) {
     const emptyMessage =
       state.results.length === 0
-        ? "[醫낇빀 ?먭? ?쒖옉] 踰꾪듉???대┃?섏꽭??"
-        : "議곌굔??留욌뒗 寃곌낵媛 ?놁뒿?덈떎.";
+        ? "[종합 점검 시작] 버튼을 클릭해 주세요."
+        : "조건에 맞는 결과가 없습니다.";
     tbody.innerHTML = `<tr><td colspan="7" class="text-muted py-3">${emptyMessage}</td></tr>`;
     return;
   }
@@ -1095,10 +1095,10 @@ function updateSummary(payload) {
   const duration = Number(summary.duration_ms || 0).toFixed(2);
 
   document.getElementById("summaryText").textContent =
-    `?꾨즺 ${summary.total_checks ?? 0}嫄?| TCP ${transportCounts.tcp ?? 0} | UDP ${transportCounts.udp ?? 0} | ` +
+    `완료 ${summary.total_checks ?? 0}건 | TCP ${transportCounts.tcp ?? 0} | UDP ${transportCounts.udp ?? 0} | ` +
     `FILTERED ${counts.FILTERED ?? 0} | NO_ROUTE ${counts.NO_ROUTE ?? 0} | PROBE_OK ${probeCounts.PROBE_OK ?? 0} | ` +
     `STABLE ${consistencyCounts.STABLE ?? 0} | FLAKY ${consistencyCounts.FLAKY ?? 0} | ` +
-    `?쒕퉬??STOPPED ${svc.STOPPED ?? 0} | ${duration}ms`;
+    `서비스 STOPPED ${svc.STOPPED ?? 0} | ${duration}ms`;
 }
 
 function summarizeAdvancedTargets(portTargets) {
@@ -1113,7 +1113,7 @@ function summarizeAdvancedTargets(portTargets) {
 function renderServerList() {
   const tbody = document.getElementById("serverListBody");
   if (!state.servers.length) {
-    tbody.innerHTML = '<tr><td colspan="7" class="text-muted py-3">?깅줉???쒕쾭媛 ?놁뒿?덈떎.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7" class="text-muted py-3">등록된 서버가 없습니다.</td></tr>';
     return;
   }
 
@@ -1128,8 +1128,8 @@ function renderServerList() {
         <td>${(server.services || []).join(", ") || "-"}</td>
         <td>${server.enable_remote_metrics ? "Y" : "N"}</td>
         <td class="d-flex gap-2">
-          <button class="btn btn-sm btn-outline-info" data-action="edit" data-id="${server.id}">?섏젙</button>
-          <button class="btn btn-sm btn-outline-danger" data-action="delete" data-id="${server.id}">??젣</button>
+          <button class="btn btn-sm btn-outline-info" data-action="edit" data-id="${server.id}">수정</button>
+          <button class="btn btn-sm btn-outline-danger" data-action="delete" data-id="${server.id}">삭제</button>
         </td>
       </tr>
     `
@@ -1365,14 +1365,14 @@ async function submitServerForm(event) {
   const credentialProfileId = document.getElementById("serverCredentialProfile").value || null;
 
   if (!name || !host) {
-    notify({ type: "warning", title: "?낅젰媛??뺤씤", message: "?쒕쾭紐낃낵 IP/Host???꾩닔?낅땲??" });
+    notify({ type: "warning", title: "입력값 확인", message: "서버명과 IP/Host는 필수입니다." });
     return;
   }
   if (ports.length === 0 && state.draftPortTargets.length === 0) {
     notify({
       type: "warning",
-      title: "?ы듃 ????놁쓬",
-      message: "湲곕낯 ?ы듃 紐⑸줉 ?먮뒗 怨좉툒 ?ы듃 ?源?以??섎굹 ?댁긽???낅젰??二쇱꽭??",
+      title: "포트 대상 없음",
+      message: "기본 포트 목록 또는 고급 포트 타깃 중 하나 이상을 입력해 주세요.",
     });
     return;
   }
@@ -1394,20 +1394,20 @@ async function submitServerForm(event) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      notify({ type: "success", title: "?섏젙 ?꾨즺", message: `${name} ?쒕쾭 ?ㅼ젙???낅뜲?댄듃?섏뿀?듬땲??` });
+      notify({ type: "success", title: "수정 완료", message: `${name} 서버 설정을 업데이트했습니다.` });
     } else {
       await fetchJson("/api/servers", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      notify({ type: "success", title: "?깅줉 ?꾨즺", message: `${name} ?쒕쾭媛 ?먭? ??곸뿉 異붽??섏뿀?듬땲??` });
+      notify({ type: "success", title: "등록 완료", message: `${name} 서버가 점검 대상에 추가되었습니다.` });
     }
 
     resetServerForm();
     await loadConfig({ silent: true });
   } catch (error) {
-    notify({ type: "error", title: "????ㅽ뙣", message: error.message, timeout: 5200 });
+    notify({ type: "error", title: "저장 실패", message: error.message, timeout: 5200 });
   }
 }
 
@@ -1424,21 +1424,21 @@ async function onServerListClick(event) {
 
   if (action === "edit") {
     fillServerForm(server);
-    notify({ type: "info", title: "?섏젙 紐⑤뱶", message: `${server.name} ??ぉ???섏젙 以묒엯?덈떎.` });
+    notify({ type: "info", title: "수정 모드", message: `${server.name} 항목을 수정 중입니다.` });
     return;
   }
 
   if (action === "delete") {
-    const confirmed = window.confirm(`${server.name} (${server.host}) ??ぉ????젣?좉퉴??`);
+    const confirmed = window.confirm(`${server.name} (${server.host}) 항목을 삭제할까요?`);
     if (!confirmed) return;
 
     try {
       await fetchJson(`/api/servers/${id}`, { method: "DELETE" });
       if (document.getElementById("editingServerId").value === id) resetServerForm();
       await loadConfig({ silent: true });
-      notify({ type: "success", title: "??젣 ?꾨즺", message: `${server.name} ??ぉ????젣?덉뒿?덈떎.` });
+      notify({ type: "success", title: "삭제 완료", message: `${server.name} 항목을 삭제했습니다.` });
     } catch (error) {
-      notify({ type: "error", title: "??젣 ?ㅽ뙣", message: error.message, timeout: 5200 });
+      notify({ type: "error", title: "삭제 실패", message: error.message, timeout: 5200 });
     }
   }
 }
@@ -1461,7 +1461,7 @@ function onDraftTargetTableClick(event) {
     fillAdvancedPortTargetInputs(draftTarget);
     setDraftTargetEditMode(index);
     renderDraftPortTargets();
-    notify({ type: "info", title: "?源??몄쭛", message: `${draftTarget.port}/${draftTarget.transport}/${draftTarget.probe} ??ぉ???몄쭛 以묒엯?덈떎.` });
+    notify({ type: "info", title: "타깃 편집", message: `${draftTarget.port}/${draftTarget.transport}/${draftTarget.probe} 항목을 편집 중입니다.` });
   }
 }
 
