@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import errno
 import inspect
+import json
 import os
 import socket
 import ssl
@@ -51,6 +52,31 @@ RETRYABLE_STATUSES: set[str] = {
 }
 NON_RETRYABLE_STATUSES: set[str] = {"OPEN", "REFUSED", "UNKNOWN_HOST", "UDP_CLOSED"}
 
+DEFAULT_RETRY_REASON_ALLOWLIST: set[str] = {
+    "WSAETIMEDOUT",
+    "ETIMEDOUT",
+    "NO_UDP_RESPONSE",
+    "WSAENETUNREACH",
+    "ENETUNREACH",
+    "WSAEHOSTUNREACH",
+    "EHOSTUNREACH",
+    "WSAENETRESET",
+    "WSAECONNRESET",
+    "ECONNRESET",
+    "WSAECONNABORTED",
+    "ECONNABORTED",
+}
+
+DEFAULT_RETRY_REASON_DENYLIST: set[str] = {
+    "EAI_NONAME",
+    "WSAECONNREFUSED",
+    "ECONNREFUSED",
+    "WSAEACCES",
+    "EACCES",
+    "EPERM",
+    "HOST_CIRCUIT_BREAKER",
+}
+
 ADAPTIVE_REASON_MULTIPLIERS: dict[str, float] = {
     "WSAETIMEDOUT": 1.2,
     "ETIMEDOUT": 1.2,
@@ -74,6 +100,9 @@ REASON_CODE_ACTION_GUIDE = {
     "WSAEACCES": "Blocked by local/remote policy. Check firewall, EDR and ACL controls.",
     "EAI_NONAME": "DNS resolve failed. Verify hostname and DNS resolver settings.",
     "NO_UDP_RESPONSE": "UDP may be open-silent or filtered. Validate with DNS/NTP probe details.",
+    "HOST_CIRCUIT_BREAKER": "Host-level circuit breaker triggered. Verify host reachability/DNS routing first.",
+    "UDP_PROBE_REQUIRED": "Policy requires protocol probe for UDP uncertainty. Configure DNS/NTP probe.",
+    "UDP_PROBE_CONFIRMED": "UDP uncertainty resolved by successful protocol probe.",
 }
 
 STATUS_PRIORITY_DEFAULT: dict[str, int] = {
@@ -161,6 +190,68 @@ def _map_os_error(exc: OSError, transport: str) -> tuple[PortStatus, str, str]:
     if "no route" in lower_text:
         return ("NO_ROUTE", reason, text)
     return ("ERROR", reason, text)
+
+
+def _normalize_reason_code_set(values: set[str] | list[str] | None, fallback: set[str]) -> set[str]:
+    if not values:
+        return set(fallback)
+    normalized: set[str] = set()
+    for raw in values:
+        name = str(raw).strip().upper()
+        if name:
+            normalized.add(name)
+    if not normalized:
+        return set(fallback)
+    return normalized
+
+
+def _probe_param_string(
+    target: PortTarget,
+    key: str,
+    *,
+    max_len: int = 255,
+) -> str | None:
+    value = target.probe_params.get(key)
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    return text[:max_len]
+
+
+def _probe_param_bool(target: PortTarget, key: str) -> bool | None:
+    value = target.probe_params.get(key)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "y"}:
+            return True
+        if lowered in {"0", "false", "no", "n"}:
+            return False
+    return None
+
+
+def _probe_param_rcodes(target: PortTarget, key: str = "dns_acceptable_rcodes") -> set[int] | None:
+    raw = target.probe_params.get(key)
+    if raw is None:
+        return None
+    values: list[int] = []
+    if isinstance(raw, int):
+        values = [raw]
+    elif isinstance(raw, str):
+        tokens = [item.strip() for item in raw.split(",")]
+        for token in tokens:
+            if not token:
+                continue
+            try:
+                values.append(int(token))
+            except ValueError:
+                continue
+    if not values:
+        return None
+    return {item for item in values if 0 <= item <= 4095}
 
 
 def _attempt_payload(
@@ -332,17 +423,29 @@ async def _udp_attempt(host: str, port: int, timeout_seconds: float, attempt: in
     return await asyncio.to_thread(_udp_attempt_sync, host, port, timeout_seconds, attempt)
 
 
-async def _http_probe(host: str, port: int, timeout_seconds: float, use_tls: bool) -> dict[str, Any]:
+async def _http_probe(
+    host: str,
+    port: int,
+    timeout_seconds: float,
+    use_tls: bool,
+    *,
+    host_header: str | None = None,
+    path: str = "/",
+    tls_sni: str | None = None,
+) -> dict[str, Any]:
     started = perf_counter()
     reader: asyncio.StreamReader | None = None
     writer: asyncio.StreamWriter | None = None
     try:
+        req_host = host_header or host
+        req_path = path if path.startswith("/") else f"/{path}"
+        sni_host = tls_sni or req_host or host
         if use_tls:
             context = ssl.create_default_context()
             context.check_hostname = False
             context.verify_mode = ssl.CERT_NONE
             reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(host, port, ssl=context, server_hostname=host),
+                asyncio.open_connection(host, port, ssl=context, server_hostname=sni_host),
                 timeout=timeout_seconds,
             )
         else:
@@ -351,7 +454,11 @@ async def _http_probe(host: str, port: int, timeout_seconds: float, use_tls: boo
                 timeout=timeout_seconds,
             )
 
-        request = f"GET / HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n".encode("ascii")
+        request = (
+            f"GET {req_path} HTTP/1.1\r\n"
+            f"Host: {req_host}\r\n"
+            "Connection: close\r\n\r\n"
+        ).encode("ascii", errors="ignore")
         writer.write(request)
         await asyncio.wait_for(writer.drain(), timeout=timeout_seconds)
         first_line = await asyncio.wait_for(reader.readline(), timeout=timeout_seconds)
@@ -463,6 +570,15 @@ DNS_QTYPE_BY_PROBE = {
     "dns_srv": 33,  # SRV
 }
 
+DNS_RCODE_NAME = {
+    0: "NOERROR",
+    1: "FORMERR",
+    2: "SERVFAIL",
+    3: "NXDOMAIN",
+    4: "NOTIMP",
+    5: "REFUSED",
+}
+
 DNS_TYPE_NAME = {
     1: "A",
     2: "NS",
@@ -501,10 +617,36 @@ def _build_edns_opt_record(udp_payload_size: int = 1232, do_bit: bool = False) -
     return b"\x00" + struct.pack("!HHIH", 41, udp_payload_size, ttl, 0)
 
 
-def _build_dns_query_packet(probe_type: ProbeType) -> tuple[int, bytes, int, str]:
+def _sanitize_dns_query_name(raw: str | None, default_name: str) -> str:
+    if raw is None:
+        return default_name
+    candidate = str(raw).strip().strip(".")
+    if not candidate:
+        return default_name
+    if len(candidate) > 253:
+        return default_name
+    labels = candidate.split(".")
+    for label in labels:
+        if not label or len(label) > 63:
+            return default_name
+    return candidate
+
+
+def _dns_rcode_name(code: int) -> str:
+    return DNS_RCODE_NAME.get(code, f"RCODE_{code}")
+
+
+def _build_dns_query_packet(
+    probe_type: ProbeType,
+    *,
+    query_name_override: str | None = None,
+) -> tuple[int, bytes, int, str]:
     normalized_probe = probe_type if probe_type in DNS_QTYPE_BY_PROBE else "dns_a"
     tx_id = int.from_bytes(os.urandom(2), "big")
-    query_name = DNS_QUERY_NAME_BY_PROBE[normalized_probe]
+    query_name = _sanitize_dns_query_name(
+        query_name_override,
+        DNS_QUERY_NAME_BY_PROBE[normalized_probe],
+    )
     qtype = DNS_QTYPE_BY_PROBE[normalized_probe]
     # RD=1, QD=1, AR=1(EDNS OPT)
     header = struct.pack("!HHHHHH", tx_id, 0x0100, 1, 0, 0, 1)
@@ -784,10 +926,22 @@ def _recv_exact(sock: socket.socket, size: int) -> bytes:
     return b"".join(chunks)
 
 
-def _dns_probe_sync(host: str, port: int, timeout_seconds: float, probe_type: ProbeType) -> dict[str, Any]:
+def _dns_probe_sync(
+    host: str,
+    port: int,
+    timeout_seconds: float,
+    probe_type: ProbeType,
+    *,
+    query_name_override: str | None = None,
+    acceptable_rcodes: set[int] | None = None,
+) -> dict[str, Any]:
     started = perf_counter()
-    query_id, packet, qtype, query_name = _build_dns_query_packet(probe_type)
+    query_id, packet, qtype, query_name = _build_dns_query_packet(
+        probe_type,
+        query_name_override=query_name_override,
+    )
     qtype_name = _dns_type_name(qtype)
+    accepted_rcode_set = acceptable_rcodes if acceptable_rcodes is not None else {0}
 
     def build_result(
         *,
@@ -912,15 +1066,27 @@ def _dns_probe_sync(host: str, port: int, timeout_seconds: float, probe_type: Pr
     if edns_meta and isinstance(edns_meta.get("extended_rcode"), int):
         ext_rcode = int(edns_meta["extended_rcode"])
     full_rcode = (ext_rcode << 4) | rcode
+    rcode_name = _dns_rcode_name(full_rcode)
     detail = (
         f"DNS {qtype_name} response via {used_transport.upper()} "
-        f"(rcode={full_rcode}, answers={ancount}, auth={nscount}, add={arcount})"
+        f"(rcode={full_rcode}:{rcode_name}, answers={ancount}, auth={nscount}, add={arcount})"
     )
     if summary:
         detail = f"{detail}: {summary}"
 
+    probe_status = "PROBE_OK"
+    if parse_error:
+        probe_status = "INVALID_RESPONSE"
+    elif full_rcode not in accepted_rcode_set:
+        # Hard fail by policy: SERVFAIL/REFUSED must be treated as probe failure.
+        probe_status = "PROBE_FAILED"
+        if full_rcode in {2, 5}:
+            detail = f"{detail} (hard fail rcode={rcode_name})"
+        else:
+            detail = f"{detail} (unexpected rcode={rcode_name})"
+
     return build_result(
-        probe_status="PROBE_OK",
+        probe_status=probe_status,
         probe_detail=detail,
         probe_meta={
             "query_type": qtype,
@@ -929,6 +1095,8 @@ def _dns_probe_sync(host: str, port: int, timeout_seconds: float, probe_type: Pr
             "rcode": rcode,
             "extended_rcode": ext_rcode,
             "full_rcode": full_rcode,
+            "rcode_name": rcode_name,
+            "accepted_rcodes": sorted(accepted_rcode_set),
             "answer_count": ancount,
             "authority_count": nscount,
             "additional_count": arcount,
@@ -1014,15 +1182,50 @@ def _ntp_probe_sync(host: str, port: int, timeout_seconds: float) -> dict[str, A
         sock.close()
 
 
-async def _run_application_probe(host: str, port: int, probe_type: ProbeType, timeout_seconds: float) -> dict[str, Any]:
+async def _run_application_probe(
+    host: str,
+    port: int,
+    probe_type: ProbeType,
+    timeout_seconds: float,
+    target: PortTarget,
+) -> dict[str, Any]:
+    http_host = _probe_param_string(target, "http_host")
+    http_path = _probe_param_string(target, "http_path") or "/"
+    tls_sni = _probe_param_string(target, "tls_sni")
+    dns_query_name = _probe_param_string(target, "dns_query_name")
+    dns_acceptable_rcodes = _probe_param_rcodes(target)
+
     if probe_type == "http":
-        return await _http_probe(host, port, timeout_seconds, use_tls=False)
+        return await _http_probe(
+            host,
+            port,
+            timeout_seconds,
+            use_tls=False,
+            host_header=http_host,
+            path=http_path,
+        )
     if probe_type == "https":
-        return await _http_probe(host, port, timeout_seconds, use_tls=True)
+        return await _http_probe(
+            host,
+            port,
+            timeout_seconds,
+            use_tls=True,
+            host_header=http_host,
+            path=http_path,
+            tls_sni=tls_sni,
+        )
     if probe_type == "rdp":
         return await _rdp_probe(host, port, timeout_seconds)
     if probe_type in {"dns", "dns_a", "dns_aaaa", "dns_mx", "dns_txt", "dns_srv", "dns_soa"}:
-        return await asyncio.to_thread(_dns_probe_sync, host, port, timeout_seconds, probe_type)
+        return await asyncio.to_thread(
+            _dns_probe_sync,
+            host,
+            port,
+            timeout_seconds,
+            probe_type,
+            query_name_override=dns_query_name,
+            acceptable_rcodes=dns_acceptable_rcodes,
+        )
     if probe_type == "ntp":
         return await asyncio.to_thread(_ntp_probe_sync, host, port, timeout_seconds)
     return {
@@ -1068,15 +1271,22 @@ def _should_retry(
     reason_code: str,
     attempt_no: int,
     max_attempts: int,
+    retry_reason_allowlist: set[str],
+    retry_reason_denylist: set[str],
 ) -> bool:
     if attempt_no >= max_attempts:
         return False
+    reason = str(reason_code).upper()
+    if reason in retry_reason_denylist:
+        return False
     if status in NON_RETRYABLE_STATUSES:
         return False
+    if reason in retry_reason_allowlist:
+        return True
     if status in RETRYABLE_STATUSES:
         return True
     # Retry unknown status only for known transient reason codes.
-    return reason_code in ADAPTIVE_REASON_MULTIPLIERS
+    return reason in ADAPTIVE_REASON_MULTIPLIERS
 
 
 def _adaptive_backoff_seconds(
@@ -1117,12 +1327,57 @@ def _consistency_indicator(attempts: list[dict[str, Any]], threshold_percent: fl
 def _expand_server_port_targets(server: ServerTarget) -> list[PortTarget]:
     combined = [PortTarget(port=port, transport="tcp", probe="auto") for port in server.ports]
     combined.extend(server.port_targets)
-    deduped: dict[tuple[int, str, str, int | None], PortTarget] = {}
+    deduped: dict[tuple[int, str, str, int | None, str], PortTarget] = {}
     for target in combined:
-        key = (target.port, target.transport, target.probe, target.retries)
+        params_key = json.dumps(target.probe_params, sort_keys=True, ensure_ascii=True)
+        key = (target.port, target.transport, target.probe, target.retries, params_key)
         if key not in deduped:
             deduped[key] = target
     return list(deduped.values())
+
+
+def _build_host_circuit_breaker_result(
+    *,
+    server: ServerTarget,
+    target: PortTarget,
+    trigger_status: PortStatus,
+    trigger_port: int,
+    trigger_reason_code: str,
+) -> dict[str, Any]:
+    return {
+        "checked_at": _utc_now_iso(),
+        "server_id": server.id,
+        "server_name": server.name,
+        "host": server.host,
+        "port": target.port,
+        "transport": target.transport,
+        "probe_type": _resolve_probe_type(target.probe, target.port, target.transport),
+        "retry_count": target.retries if target.retries is not None else 0,
+        "attempt_count": 0,
+        "status": trigger_status,
+        "reason_code": "HOST_CIRCUIT_BREAKER",
+        "detail": (
+            f"Skipped by host circuit breaker after {trigger_status} on "
+            f"port {trigger_port} ({trigger_reason_code})."
+        ),
+        "recommended_action": _recommended_action(
+            trigger_status,
+            target.transport,
+            "SKIPPED",
+            trigger_reason_code,
+        ),
+        "consistency": "UNKNOWN",
+        "consistency_score": 0.0,
+        "latency_ms": 0.0,
+        "total_latency_ms": 0.0,
+        "attempts": [],
+        "probe_result": {
+            "probe_type": _resolve_probe_type(target.probe, target.port, target.transport),
+            "probe_status": "SKIPPED",
+            "probe_detail": "Skipped by host circuit breaker.",
+            "probe_latency_ms": 0.0,
+        },
+    }
 
 
 async def _emit_progress(progress_callback: ProgressCallback | None, payload: dict[str, Any]) -> None:
@@ -1146,11 +1401,22 @@ async def check_single_port_target(
     retry_backoff_max_ms: int = 0,
     flaky_threshold_percent: float = 100.0,
     status_priority_overrides: dict[str, int] | None = None,
+    retry_reason_allowlist: set[str] | list[str] | None = None,
+    retry_reason_denylist: set[str] | list[str] | None = None,
+    udp_enforce_probe_on_open_or_filtered: bool = True,
 ) -> dict[str, Any]:
     check_started = perf_counter()
     retries = target.retries if target.retries is not None else default_retries
     max_attempts = retries + 1
     attempts: list[dict[str, Any]] = []
+    retry_allow_set = _normalize_reason_code_set(
+        retry_reason_allowlist,
+        DEFAULT_RETRY_REASON_ALLOWLIST,
+    )
+    retry_deny_set = _normalize_reason_code_set(
+        retry_reason_denylist,
+        DEFAULT_RETRY_REASON_DENYLIST,
+    )
 
     for attempt_no in range(1, max_attempts + 1):
         if target.transport == "udp":
@@ -1166,6 +1432,8 @@ async def check_single_port_target(
             reason_code=str(attempt["reason_code"]),
             attempt_no=attempt_no,
             max_attempts=max_attempts,
+            retry_reason_allowlist=retry_allow_set,
+            retry_reason_denylist=retry_deny_set,
         ):
             break
 
@@ -1184,6 +1452,7 @@ async def check_single_port_target(
         status_priority_overrides=status_priority_overrides,
     )
     final_attempt = attempts[-1]
+    final_reason_code = str(final_attempt["reason_code"])
     probe_type = _resolve_probe_type(target.probe, target.port, target.transport)
     probe_result = {
         "probe_type": probe_type,
@@ -1198,12 +1467,28 @@ async def check_single_port_target(
     if probe_type != "none" and (can_probe_tcp or can_probe_udp):
         probe_result = {
             "probe_type": probe_type,
-            **(await _run_application_probe(host, target.port, probe_type, probe_timeout)),
+            **(await _run_application_probe(host, target.port, probe_type, probe_timeout, target)),
         }
 
     detail = final_attempt["detail"]
     if final_status == "FILTERED":
         detail = f"{detail} Final decision: likely filtered/dropped after {len(attempts)} attempts."
+
+    # UDP refinement policy:
+    # - Promote uncertain UDP status to OPEN when application probe succeeds.
+    # - If uncertain and no probe is configured while policy is enabled, annotate as policy failure.
+    if target.transport == "udp" and final_status == "UDP_OPEN_OR_FILTERED":
+        if str(probe_result.get("probe_status")) == "PROBE_OK":
+            final_status = "OPEN"
+            final_reason_code = "UDP_PROBE_CONFIRMED"
+            detail = f"{detail} Promoted to OPEN by UDP application probe success."
+        elif udp_enforce_probe_on_open_or_filtered and probe_type == "none":
+            final_reason_code = "UDP_PROBE_REQUIRED"
+            detail = (
+                f"{detail} Policy requires an explicit UDP application probe "
+                "for OPEN_OR_FILTERED verdict."
+            )
+
     consistency, consistency_score = _consistency_indicator(attempts, threshold_percent=flaky_threshold_percent)
 
     total_elapsed = round((perf_counter() - check_started) * 1000, 2)
@@ -1218,13 +1503,13 @@ async def check_single_port_target(
         "retry_count": retries,
         "attempt_count": len(attempts),
         "status": final_status,
-        "reason_code": final_attempt["reason_code"],
+        "reason_code": final_reason_code,
         "detail": detail,
         "recommended_action": _recommended_action(
             final_status,
             target.transport,
             str(probe_result["probe_status"]),
-            str(final_attempt["reason_code"]),
+            final_reason_code,
         ),
         "consistency": consistency,
         "consistency_score": consistency_score,
@@ -1246,11 +1531,22 @@ async def run_port_sweep(
     retry_backoff_max_ms: int = 0,
     flaky_threshold_percent: float = 100.0,
     status_priority_overrides: dict[str, int] | None = None,
+    retry_reason_allowlist: list[str] | set[str] | None = None,
+    retry_reason_denylist: list[str] | set[str] | None = None,
+    udp_enforce_probe_on_open_or_filtered: bool = True,
     progress_callback: ProgressCallback | None = None,
 ) -> dict[str, Any]:
     started = perf_counter()
     max_concurrency = max(1, int(max_concurrency))
     batch_size = max(max_concurrency, int(batch_size))
+    retry_allow_set = _normalize_reason_code_set(
+        retry_reason_allowlist,
+        DEFAULT_RETRY_REASON_ALLOWLIST,
+    )
+    retry_deny_set = _normalize_reason_code_set(
+        retry_reason_denylist,
+        DEFAULT_RETRY_REASON_DENYLIST,
+    )
 
     expanded_targets: list[tuple[ServerTarget, PortTarget]] = []
     for server in servers:
@@ -1274,11 +1570,12 @@ async def run_port_sweep(
         }
 
     semaphore = asyncio.Semaphore(max_concurrency)
+    progress_lock = asyncio.Lock()
     results: list[dict[str, Any]] = []
     processed = 0
     batch_count = 0
 
-    async def worker(server: ServerTarget, target: PortTarget) -> dict[str, Any]:
+    async def check_worker(server: ServerTarget, target: PortTarget) -> dict[str, Any]:
         async with semaphore:
             return await check_single_port_target(
                 server_id=server.id,
@@ -1292,35 +1589,92 @@ async def run_port_sweep(
                 retry_backoff_max_ms=retry_backoff_max_ms,
                 flaky_threshold_percent=flaky_threshold_percent,
                 status_priority_overrides=status_priority_overrides,
+                retry_reason_allowlist=retry_allow_set,
+                retry_reason_denylist=retry_deny_set,
+                udp_enforce_probe_on_open_or_filtered=udp_enforce_probe_on_open_or_filtered,
             )
 
-    for batch_start in range(0, total_targets, batch_size):
-        chunk = expanded_targets[batch_start : batch_start + batch_size]
+    async def push_result(result: dict[str, Any], *, batch_index: int, batch_total: int) -> None:
+        nonlocal processed
+        async with progress_lock:
+            results.append(result)
+            processed += 1
+            payload = {
+                "processed": processed,
+                "total": total_targets,
+                "progress_percent": round((processed / total_targets) * 100, 2),
+                "batch_index": batch_index,
+                "batch_total": batch_total,
+                "last": {
+                    "server_name": result.get("server_name"),
+                    "host": result.get("host"),
+                    "port": result.get("port"),
+                    "transport": result.get("transport"),
+                    "status": result.get("status"),
+                    "reason_code": result.get("reason_code"),
+                },
+            }
+        await _emit_progress(progress_callback, payload)
+
+    # Group by host to support host-level circuit breaker.
+    host_targets: dict[str, list[tuple[ServerTarget, PortTarget]]] = {}
+    for server, target in expanded_targets:
+        host_targets.setdefault(server.host, []).append((server, target))
+
+    host_items = list(host_targets.items())
+    host_batch_size = max(1, min(len(host_items), batch_size))
+    total_host_batches = (len(host_items) + host_batch_size - 1) // host_batch_size
+
+    async def host_worker(
+        host: str,
+        targets: list[tuple[ServerTarget, PortTarget]],
+        *,
+        batch_index: int,
+    ) -> None:
+        breaker: tuple[PortStatus, int, str] | None = None
+        for server, target in targets:
+            if breaker is not None:
+                trigger_status, trigger_port, trigger_reason = breaker
+                skipped = _build_host_circuit_breaker_result(
+                    server=server,
+                    target=target,
+                    trigger_status=trigger_status,
+                    trigger_port=trigger_port,
+                    trigger_reason_code=trigger_reason,
+                )
+                await push_result(
+                    skipped,
+                    batch_index=batch_index,
+                    batch_total=total_host_batches,
+                )
+                continue
+
+            result = await check_worker(server, target)
+            await push_result(
+                result,
+                batch_index=batch_index,
+                batch_total=total_host_batches,
+            )
+            status = str(result.get("status", "")).upper()
+            if status in {"UNKNOWN_HOST", "NO_ROUTE"}:
+                breaker = (
+                    status if status in {"UNKNOWN_HOST", "NO_ROUTE"} else "UNKNOWN_HOST",
+                    int(result.get("port") or target.port),
+                    str(result.get("reason_code") or "UNKNOWN"),
+                )
+
+    for batch_start in range(0, len(host_items), host_batch_size):
+        chunk = host_items[batch_start : batch_start + host_batch_size]
         batch_count += 1
-        tasks = [asyncio.create_task(worker(server, target)) for server, target in chunk]
+        tasks = [
+            asyncio.create_task(
+                host_worker(host, targets, batch_index=batch_count),
+            )
+            for host, targets in chunk
+        ]
         try:
             for finished in asyncio.as_completed(tasks):
-                result = await finished
-                results.append(result)
-                processed += 1
-                await _emit_progress(
-                    progress_callback,
-                    {
-                        "processed": processed,
-                        "total": total_targets,
-                        "progress_percent": round((processed / total_targets) * 100, 2),
-                        "batch_index": batch_count,
-                        "batch_total": (total_targets + batch_size - 1) // batch_size,
-                        "last": {
-                            "server_name": result.get("server_name"),
-                            "host": result.get("host"),
-                            "port": result.get("port"),
-                            "transport": result.get("transport"),
-                            "status": result.get("status"),
-                            "reason_code": result.get("reason_code"),
-                        },
-                    },
-                )
+                await finished
         finally:
             for task in tasks:
                 if not task.done():

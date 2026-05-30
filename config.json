@@ -1,6 +1,57 @@
 {
   "timeout_seconds": 2.0,
+  "probe_timeout_seconds": 1.5,
   "port_check_retries": 2,
-  "servers": [],
-  "updated_at": "2026-05-26T15:09:45.569894Z"
+  "max_concurrency": 200,
+  "batch_size": 250,
+  "retry_backoff_base_ms": 120,
+  "retry_backoff_max_ms": 1500,
+  "flaky_threshold_percent": 100.0,
+  "status_priority_overrides": {},
+  "retry_reason_allowlist": [
+    "WSAETIMEDOUT",
+    "ETIMEDOUT",
+    "NO_UDP_RESPONSE",
+    "WSAENETUNREACH",
+    "ENETUNREACH",
+    "WSAEHOSTUNREACH",
+    "EHOSTUNREACH",
+    "WSAENETRESET",
+    "WSAECONNRESET",
+    "ECONNRESET",
+    "WSAECONNABORTED",
+    "ECONNABORTED"
+  ],
+  "retry_reason_denylist": [
+    "EAI_NONAME",
+    "WSAECONNREFUSED",
+    "ECONNREFUSED",
+    "WSAEACCES",
+    "EACCES",
+    "EPERM",
+    "HOST_CIRCUIT_BREAKER"
+  ],
+  "udp_enforce_probe_on_open_or_filtered": true,
+  "history_enabled": true,
+  "history_retention_days": 30,
+  "default_page_size": 200,
+  "servers": [
+    {
+      "id": "45e30f3fc43d",
+      "name": "Test",
+      "host": "192.168.0.123",
+      "ports": [
+        80,
+        443,
+        3389
+      ],
+      "port_targets": [],
+      "services": [],
+      "enable_remote_metrics": true,
+      "credential_profile_id": null
+    }
+  ],
+  "templates": [],
+  "credential_profiles": [],
+  "updated_at": "2026-05-29T12:51:51.024527Z"
 }

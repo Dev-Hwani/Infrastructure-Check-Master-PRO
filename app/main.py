@@ -142,6 +142,9 @@ async def _execute_full_check(
             retry_backoff_max_ms=config.retry_backoff_max_ms,
             flaky_threshold_percent=config.flaky_threshold_percent,
             status_priority_overrides=config.status_priority_overrides,
+            retry_reason_allowlist=config.retry_reason_allowlist,
+            retry_reason_denylist=config.retry_reason_denylist,
+            udp_enforce_probe_on_open_or_filtered=config.udp_enforce_probe_on_open_or_filtered,
             progress_callback=progress_callback,
         )
     )
@@ -166,6 +169,9 @@ async def _execute_full_check(
         "retry_backoff_base_ms": config.retry_backoff_base_ms,
         "retry_backoff_max_ms": config.retry_backoff_max_ms,
         "flaky_threshold_percent": config.flaky_threshold_percent,
+        "retry_reason_allowlist": config.retry_reason_allowlist,
+        "retry_reason_denylist": config.retry_reason_denylist,
+        "udp_enforce_probe_on_open_or_filtered": config.udp_enforce_probe_on_open_or_filtered,
         "summary": port_checks["summary"],
         "local_metrics": local_metrics,
         "remote_metrics": remote_metrics,

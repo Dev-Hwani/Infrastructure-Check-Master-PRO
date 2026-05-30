@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from typing import Literal
 from uuid import uuid4
@@ -64,6 +65,7 @@ class PortTarget(BaseModel):
     transport: TransportProtocol = "tcp"
     probe: ProbeType = "auto"
     retries: int | None = Field(default=None, ge=0, le=5)
+    probe_params: dict[str, str | int | float | bool] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def validate_probe_transport(self) -> "PortTarget":
@@ -72,6 +74,28 @@ class PortTarget(BaseModel):
         if self.transport == "udp" and self.probe in TCP_ONLY_PROBES:
             raise ValueError(f"Probe '{self.probe}' requires TCP transport.")
         return self
+
+    @field_validator("probe_params")
+    @classmethod
+    def validate_probe_params(
+        cls,
+        value: dict[str, str | int | float | bool],
+    ) -> dict[str, str | int | float | bool]:
+        normalized: dict[str, str | int | float | bool] = {}
+        for raw_key, raw_value in value.items():
+            key = str(raw_key).strip()
+            if not key:
+                continue
+            if isinstance(raw_value, str):
+                trimmed = raw_value.strip()
+                if len(trimmed) > 300:
+                    raise ValueError(f"probe_params value too long for key '{key}'")
+                normalized[key] = trimmed
+            elif isinstance(raw_value, (int, float, bool)):
+                normalized[key] = raw_value
+            else:
+                raise ValueError(f"Unsupported probe_params value type for key '{key}'")
+        return normalized
 
 
 class TargetTemplate(BaseModel):
@@ -96,9 +120,10 @@ class TargetTemplate(BaseModel):
     @field_validator("port_targets")
     @classmethod
     def validate_port_targets(cls, port_targets: list[PortTarget]) -> list[PortTarget]:
-        deduped: dict[tuple[int, str, str], PortTarget] = {}
+        deduped: dict[tuple[int, str, str, str], PortTarget] = {}
         for target in port_targets:
-            key = (target.port, target.transport, target.probe)
+            params_key = json.dumps(target.probe_params, sort_keys=True, ensure_ascii=True)
+            key = (target.port, target.transport, target.probe, params_key)
             if key not in deduped:
                 deduped[key] = target
         return list(deduped.values())
@@ -302,9 +327,10 @@ class ServerTarget(BaseModel):
     @field_validator("port_targets")
     @classmethod
     def validate_port_targets(cls, port_targets: list[PortTarget]) -> list[PortTarget]:
-        deduped: dict[tuple[int, str, str], PortTarget] = {}
+        deduped: dict[tuple[int, str, str, str], PortTarget] = {}
         for target in port_targets:
-            key = (target.port, target.transport, target.probe)
+            params_key = json.dumps(target.probe_params, sort_keys=True, ensure_ascii=True)
+            key = (target.port, target.transport, target.probe, params_key)
             if key not in deduped:
                 deduped[key] = target
         return list(deduped.values())
@@ -406,6 +432,34 @@ class AppConfig(BaseModel):
     retry_backoff_max_ms: int = 1500
     flaky_threshold_percent: float = 100.0
     status_priority_overrides: dict[str, int] = Field(default_factory=dict)
+    retry_reason_allowlist: list[str] = Field(
+        default_factory=lambda: [
+            "WSAETIMEDOUT",
+            "ETIMEDOUT",
+            "NO_UDP_RESPONSE",
+            "WSAENETUNREACH",
+            "ENETUNREACH",
+            "WSAEHOSTUNREACH",
+            "EHOSTUNREACH",
+            "WSAENETRESET",
+            "WSAECONNRESET",
+            "ECONNRESET",
+            "WSAECONNABORTED",
+            "ECONNABORTED",
+        ]
+    )
+    retry_reason_denylist: list[str] = Field(
+        default_factory=lambda: [
+            "EAI_NONAME",
+            "WSAECONNREFUSED",
+            "ECONNREFUSED",
+            "WSAEACCES",
+            "EACCES",
+            "EPERM",
+            "HOST_CIRCUIT_BREAKER",
+        ]
+    )
+    udp_enforce_probe_on_open_or_filtered: bool = True
     history_enabled: bool = True
     history_retention_days: int = 30
     default_page_size: int = 200
@@ -489,6 +543,23 @@ class AppConfig(BaseModel):
             if weight < 0 or weight > 10000:
                 raise ValueError(f"status priority out of range for {name}: {weight}")
             normalized[name] = weight
+        return normalized
+
+    @field_validator("retry_reason_allowlist", "retry_reason_denylist")
+    @classmethod
+    def validate_retry_reason_lists(cls, value: list[str]) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for raw in value:
+            name = str(raw).strip().upper()
+            if not name:
+                continue
+            if len(name) > 80:
+                raise ValueError(f"reason code is too long: {name}")
+            if name in seen:
+                continue
+            seen.add(name)
+            normalized.append(name)
         return normalized
 
     @field_validator("history_retention_days")

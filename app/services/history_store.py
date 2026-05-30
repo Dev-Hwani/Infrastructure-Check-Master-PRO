@@ -124,6 +124,11 @@ class HistoryStore:
             "retry_backoff_base_ms": payload.get("retry_backoff_base_ms"),
             "retry_backoff_max_ms": payload.get("retry_backoff_max_ms"),
             "flaky_threshold_percent": payload.get("flaky_threshold_percent"),
+            "retry_reason_allowlist": payload.get("retry_reason_allowlist"),
+            "retry_reason_denylist": payload.get("retry_reason_denylist"),
+            "udp_enforce_probe_on_open_or_filtered": payload.get(
+                "udp_enforce_probe_on_open_or_filtered"
+            ),
         }
 
         with self._lock, self._connect() as conn:

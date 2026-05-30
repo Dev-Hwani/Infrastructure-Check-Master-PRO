@@ -124,6 +124,11 @@ const reasonCodeGuideMap = {
   WSAEACCES: "Connection blocked by policy/firewall.",
   EAI_NONAME: "DNS resolution failed for host/hostname.",
   NO_UDP_RESPONSE: "No UDP response; could be open-silent or filtered.",
+  HOST_CIRCUIT_BREAKER:
+    "Host-level circuit breaker triggered after UNKNOWN_HOST/NO_ROUTE. Check host reachability first.",
+  UDP_PROBE_REQUIRED:
+    "Policy requires explicit UDP protocol probe to finalize UDP_OPEN_OR_FILTERED result.",
+  UDP_PROBE_CONFIRMED: "UDP application probe succeeded; uncertain transport result was promoted to OPEN.",
 };
 
 function notify({ type = "info", title = "Info", message = "", timeout = 3600 }) {
@@ -267,7 +272,14 @@ async function loadTrendData({ silent = true } = {}) {
 }
 
 function draftTargetKey(target) {
-  return `${target.port}/${target.transport}/${target.probe}`;
+  const probeParams =
+    target && target.probe_params && typeof target.probe_params === "object"
+      ? Object.keys(target.probe_params)
+          .sort()
+          .map((key) => `${key}:${String(target.probe_params[key])}`)
+          .join("|")
+      : "";
+  return `${target.port}/${target.transport}/${target.probe}/${probeParams}`;
 }
 
 function normalizeProbe(rawProbe) {
@@ -294,7 +306,16 @@ function normalizePortTarget(input) {
   if (!PROBE_OPTIONS.includes(probe)) return null;
   if (retries < 0 || retries > 5) return null;
   if (!isProbeAllowedByTransport(probe, transport)) return null;
-  return { port, transport, probe, retries };
+  const probeParams = {};
+  if (input && input.probe_params && typeof input.probe_params === "object") {
+    Object.entries(input.probe_params).forEach(([key, value]) => {
+      if (!key) return;
+      if (["string", "number", "boolean"].includes(typeof value)) {
+        probeParams[key] = value;
+      }
+    });
+  }
+  return { port, transport, probe, retries, probe_params: probeParams };
 }
 
 function normalizeServerPortTarget(item) {
@@ -303,6 +324,7 @@ function normalizeServerPortTarget(item) {
     transport: item.transport || "tcp",
     probe: item.probe || "auto",
     retries: Number.isInteger(item.retries) ? item.retries : 2,
+    probe_params: item.probe_params || {},
   });
 }
 
